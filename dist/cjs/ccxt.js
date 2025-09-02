@@ -65,6 +65,7 @@ var delta = require('./src/delta.js');
 var deribit = require('./src/deribit.js');
 var derive = require('./src/derive.js');
 var digifinex = require('./src/digifinex.js');
+var ekiden = require('./src/ekiden.js');
 var exmo = require('./src/exmo.js');
 var fmfwio = require('./src/fmfwio.js');
 var foxbit = require('./src/foxbit.js');
@@ -152,6 +153,7 @@ var cryptocom$1 = require('./src/pro/cryptocom.js');
 var defx$1 = require('./src/pro/defx.js');
 var deribit$1 = require('./src/pro/deribit.js');
 var derive$1 = require('./src/pro/derive.js');
+var ekiden$1 = require('./src/pro/ekiden.js');
 var exmo$1 = require('./src/pro/exmo.js');
 var gate$1 = require('./src/pro/gate.js');
 var gateio$1 = require('./src/pro/gateio.js');
@@ -248,6 +250,7 @@ const exchanges = {
     'deribit': deribit["default"],
     'derive': derive["default"],
     'digifinex': digifinex["default"],
+    'ekiden': ekiden["default"],
     'exmo': exmo["default"],
     'fmfwio': fmfwio["default"],
     'foxbit': foxbit["default"],
@@ -337,6 +340,7 @@ const pro = {
     'defx': defx$1["default"],
     'deribit': deribit$1["default"],
     'derive': derive$1["default"],
+    'ekiden': ekiden$1["default"],
     'exmo': exmo$1["default"],
     'gate': gate$1["default"],
     'gateio': gateio$1["default"],
@@ -479,6 +483,7 @@ exports.delta = delta["default"];
 exports.deribit = deribit["default"];
 exports.derive = derive["default"];
 exports.digifinex = digifinex["default"];
+exports.ekiden = ekiden["default"];
 exports.exmo = exmo["default"];
 exports.fmfwio = fmfwio["default"];
 exports.foxbit = foxbit["default"];

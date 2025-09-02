@@ -99,6 +99,7 @@ import delta from  './src/delta.js'
 import deribit from  './src/deribit.js'
 import derive from  './src/derive.js'
 import digifinex from  './src/digifinex.js'
+import ekiden from  './src/ekiden.js'
 import exmo from  './src/exmo.js'
 import fmfwio from  './src/fmfwio.js'
 import foxbit from  './src/foxbit.js'
@@ -189,6 +190,7 @@ import cryptocomPro from  './src/pro/cryptocom.js'
 import defxPro from  './src/pro/defx.js'
 import deribitPro from  './src/pro/deribit.js'
 import derivePro from  './src/pro/derive.js'
+import ekidenPro from  './src/pro/ekiden.js'
 import exmoPro from  './src/pro/exmo.js'
 import gatePro from  './src/pro/gate.js'
 import gateioPro from  './src/pro/gateio.js'
@@ -281,6 +283,7 @@ const exchanges = {
     'deribit':                deribit,
     'derive':                 derive,
     'digifinex':              digifinex,
+    'ekiden':                 ekiden,
     'exmo':                   exmo,
     'fmfwio':                 fmfwio,
     'foxbit':                 foxbit,
@@ -371,6 +374,7 @@ const pro = {
     'defx':                   defxPro,
     'deribit':                deribitPro,
     'derive':                 derivePro,
+    'ekiden':                 ekidenPro,
     'exmo':                   exmoPro,
     'gate':                   gatePro,
     'gateio':                 gateioPro,
@@ -605,6 +609,7 @@ export {
     deribit,
     derive,
     digifinex,
+    ekiden,
     exmo,
     fmfwio,
     foxbit,
