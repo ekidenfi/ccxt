@@ -128,7 +128,7 @@ class ekiden(Exchange, ImplicitAPI):
 
     def sign_message_hex(self, messageHex: str) -> str:
         msgBin = self.base16_to_binary(messageHex)
-        pkHex = self.privateKey[2:] if self.privateKey.startswith('0x') else self.privateKey
+        pkHex = self.secret[2:] if self.secret.startswith('0x') else self.secret
         secret = self.base16_to_binary(pkHex)
         sigB64 = self.eddsa(msgBin, secret, 'ed25519')
         sigHex = self.binary_to_base16(self.base64_to_binary(sigB64))
@@ -711,8 +711,8 @@ class ekiden(Exchange, ImplicitAPI):
             else:
                 responseProvided = await self.v1PrivatePostUserIntent(request)
             return self.safe_order({'id': None, 'symbol': market['symbol'], 'info': responseProvided})
-        if not self.privateKey:
-            raise NotSupported(self.id + ' createOrder() requires either params {payload, signature, nonce} or exchange.privateKey to sign the intent')
+        if not self.secret:
+            raise NotSupported(self.id + ' createOrder() requires either params {payload, signature, nonce} or exchange.secret to sign the intent')
         leverage = self.safe_integer(params, 'leverage', 1)
         commitFlag = self.safe_bool(params, 'commit', True)
         order = self.scale_order_fields(market, side, amount, price, type, leverage)
@@ -755,8 +755,8 @@ class ekiden(Exchange, ImplicitAPI):
             else:
                 responseProvided = await self.v1PrivatePostUserIntent(request)
             return self.parse_cancel_order_result(responseProvided, id, market)
-        if not self.privateKey:
-            raise NotSupported(self.id + ' cancelOrder() requires either params {payload, signature, nonce} or exchange.privateKey to sign the intent')
+        if not self.secret:
+            raise NotSupported(self.id + ' cancelOrder() requires either params {payload, signature, nonce} or exchange.secret to sign the intent')
         commitFlag = self.safe_bool(params, 'commit', True)
         # Build cancel payload for a single sid(id)
         payload: dict = {'type': 'order_cancel', 'cancels': [{'sid': id}]}

@@ -148,7 +148,7 @@ export default class ekiden extends Exchange {
 
     signMessageHex (messageHex: string): string {
         const msgBin = this.base16ToBinary (messageHex);
-        const pkHex = this.privateKey.startsWith ('0x') ? this.privateKey.slice (2) : this.privateKey;
+        const pkHex = this.secret.startsWith ('0x') ? this.secret.slice (2) : this.secret;
         const secret = this.base16ToBinary (pkHex);
         const sigB64 = eddsa (msgBin, secret, ed25519);
         const sigHex = this.binaryToBase16 (this.base64ToBinary (sigB64));
@@ -326,7 +326,7 @@ export default class ekiden extends Exchange {
                 '1d': '1d',
             },
             'urls': {
-                'logo': 'https://raw.githubusercontent.com/ekidenfi/ekiden-docs/refs/heads/main/logo/dark.svg',
+                'logo': 'https://raw.githubusercontent.com/ekidenfi/ekiden-docs/refs/heads/main/logo/light.svg',
                 'api': {
                     'public': 'https://api.ekiden.fi',
                     'private': 'https://api.ekiden.fi',
@@ -795,8 +795,8 @@ export default class ekiden extends Exchange {
             }
             return this.safeOrder ({ 'id': undefined, 'symbol': market['symbol'], 'info': responseProvided });
         }
-        if (!this.privateKey) {
-            throw new NotSupported (this.id + ' createOrder() requires either params { payload, signature, nonce } or exchange.privateKey to sign the intent');
+        if (!this.secret) {
+            throw new NotSupported (this.id + ' createOrder() requires either params { payload, signature, nonce } or exchange.secret to sign the intent');
         }
         const leverage = this.safeInteger (params, 'leverage', 1);
         const commitFlag = this.safeBool (params, 'commit', true);
@@ -849,8 +849,8 @@ export default class ekiden extends Exchange {
             }
             return this.parseCancelOrderResult (responseProvided, id, market);
         }
-        if (!this.privateKey) {
-            throw new NotSupported (this.id + ' cancelOrder() requires either params { payload, signature, nonce } or exchange.privateKey to sign the intent');
+        if (!this.secret) {
+            throw new NotSupported (this.id + ' cancelOrder() requires either params { payload, signature, nonce } or exchange.secret to sign the intent');
         }
         const commitFlag = this.safeBool (params, 'commit', true);
         // Build cancel payload for a single sid (id)

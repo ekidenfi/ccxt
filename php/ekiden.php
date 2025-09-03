@@ -145,7 +145,7 @@ class ekiden extends Exchange {
 
     public function sign_message_hex(string $messageHex): string {
         $msgBin = $this->base16_to_binary($messageHex);
-        $pkHex = str_starts_with($this->privateKey, '0x') ? mb_substr($this->privateKey, 2) : $this->privateKey;
+        $pkHex = str_starts_with($this->secret, '0x') ? mb_substr($this->secret, 2) : $this->secret;
         $secret = $this->base16_to_binary($pkHex);
         $sigB64 = $this->eddsa($msgBin, $secret, 'ed25519');
         $sigHex = bin2hex(base64_decode($sigB64));
@@ -792,8 +792,8 @@ class ekiden extends Exchange {
             }
             return $this->safe_order(array( 'id' => null, 'symbol' => $market['symbol'], 'info' => $responseProvided ));
         }
-        if (!$this->privateKey) {
-            throw new NotSupported($this->id . ' createOrder() requires either $params array( $payload, signature, $nonce ) or exchange.privateKey to sign the intent');
+        if (!$this->secret) {
+            throw new NotSupported($this->id . ' createOrder() requires either $params array( $payload, signature, $nonce ) or exchange.secret to sign the intent');
         }
         $leverage = $this->safe_integer($params, 'leverage', 1);
         $commitFlag = $this->safe_bool($params, 'commit', true);
@@ -846,8 +846,8 @@ class ekiden extends Exchange {
             }
             return $this->parse_cancel_order_result($responseProvided, $id, $market);
         }
-        if (!$this->privateKey) {
-            throw new NotSupported($this->id . ' cancelOrder() requires either $params array( $payload, signature, $nonce ) or exchange.privateKey to sign the intent');
+        if (!$this->secret) {
+            throw new NotSupported($this->id . ' cancelOrder() requires either $params array( $payload, signature, $nonce ) or exchange.secret to sign the intent');
         }
         $commitFlag = $this->safe_bool($params, 'commit', true);
         // Build cancel $payload for a single sid ($id)
