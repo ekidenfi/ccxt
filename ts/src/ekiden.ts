@@ -12,7 +12,39 @@ import { ed25519 } from './static_dependencies/noble-curves/ed25519.js';
  * @augments Exchange
  */
 export default class ekiden extends Exchange {
+    protected normalizeSymbol (symbol: string): string {
+        let s = symbol.toUpperCase ();
+        if (s.indexOf ('/') >= 0) {
+            const parts = s.split ('/');
+            const leftRaw = parts[0];
+            const rightRaw = parts[1];
+            let left = leftRaw.replace (/-0x[a-f0-9]+$/i, '');
+            let right = rightRaw;
+            if (right === 'NONE') {
+                if (/-PERP$/i.test (left)) {
+                    left = left.replace (/-PERP$/i, '');
+                    right = 'USDC';
+                } else if (left.indexOf ('-') >= 0) {
+                    const idx = left.indexOf ('-');
+                    const base = left.slice (0, idx);
+                    const quote = left.slice (idx + 1);
+                    left = base;
+                    right = quote;
+                }
+            }
+            s = left + '/' + right;
+        } else {
+            s = s.replace (/-0x[a-f0-9]+$/i, '');
+            s = s.replace (/-PERP$/i, '/USDC');
+            if ((s.indexOf ('/') < 0) && (s.indexOf ('-') >= 0)) {
+                const idx = s.indexOf ('-');
+                s = s.slice (0, idx) + '/' + s.slice (idx + 1);
+            }
+        }
+        return s;
+    }
     // --- Intent signing helpers (mirrors ts-sdk buildOrderPayload) ---
+
     protected intentSeed (): Uint8Array {
         // Same SEED used in ts-sdk composeHexPayload
         return new Uint8Array ([ 226, 172, 78, 86, 136, 217, 100, 39, 10, 216, 118, 215, 96, 194, 235, 178, 213, 79, 178, 109, 147, 81, 44, 121, 0, 73, 182, 88, 55, 48, 208, 111 ]);
@@ -353,7 +385,8 @@ export default class ekiden extends Exchange {
         for (let i = 0; i < response.length; i++) {
             const market = response[i];
             const id = this.safeString (market, 'addr');
-            const symbol = this.safeString (market, 'symbol');
+            const rawSymbol = this.safeString (market, 'symbol');
+            const symbol = (rawSymbol !== undefined) ? this.normalizeSymbol (rawSymbol) : undefined;
             const baseId = this.safeString (market, 'base_addr');
             const quoteId = this.safeString (market, 'quote_addr');
             const baseDecimals = this.safeInteger (market, 'base_decimals');
@@ -430,7 +463,7 @@ export default class ekiden extends Exchange {
 
     async fetchTrades (symbol: string, since: Int = undefined, limit: Int = undefined, params = {}): Promise<Trade[]> {
         await this.loadMarkets ();
-        const market = this.market (symbol);
+        const market = this.market (this.normalizeSymbol (symbol));
         const request: Dict = {
             'market_addr': market['id'],
         };
@@ -445,7 +478,7 @@ export default class ekiden extends Exchange {
 
     async fetchOrderBook (symbol: string, limit: Int = undefined, params = {}): Promise<OrderBook> {
         await this.loadMarkets ();
-        const market = this.market (symbol);
+        const market = this.market (this.normalizeSymbol (symbol));
         const request: Dict = { 'market_addr': market['id'] };
         if (limit !== undefined) {
             request['per_page'] = limit;
@@ -551,7 +584,7 @@ export default class ekiden extends Exchange {
 
     async fetchOHLCV (symbol: string, timeframe = '1h', since: Int = undefined, limit: Int = undefined, params = {}): Promise<OHLCV[]> {
         await this.loadMarkets ();
-        const market = this.market (symbol);
+        const market = this.market (this.normalizeSymbol (symbol));
         const request: Dict = {
             'market_addr': market['id'],
             'timeframe': timeframe,
@@ -569,7 +602,7 @@ export default class ekiden extends Exchange {
 
     async fetchTicker (symbol: string, params = {}): Promise<Ticker> {
         await this.loadMarkets ();
-        const market = this.market (symbol);
+        const market = this.market (this.normalizeSymbol (symbol));
         const response = await this.v1PublicGetMarketCandlesStatsMarketAddr (this.extend ({ 'market_addr': market['id'] }, params));
         // MarketStatsResponse: current_price, price_24h_ago, price_change_24h, high_24h, low_24h, volume_24h, trades_24h
         const last = this.safeNumber (response, 'current_price');
@@ -659,7 +692,7 @@ export default class ekiden extends Exchange {
     async fetchOpenOrders (symbol: Str = undefined, since: Int = undefined, limit: Int = undefined, params = {}): Promise<Order[]> {
         await this.loadMarkets ();
         this.checkRequiredCredentials (false);
-        const market = (symbol !== undefined) ? this.market (symbol) : undefined;
+        const market = (symbol !== undefined) ? this.market (this.normalizeSymbol (symbol)) : undefined;
         const request: Dict = {};
         if (market) {
             request['market_addr'] = market['id'];
@@ -675,7 +708,7 @@ export default class ekiden extends Exchange {
     async fetchClosedOrders (symbol: Str = undefined, since: Int = undefined, limit: Int = undefined, params = {}): Promise<Order[]> {
         await this.loadMarkets ();
         this.checkRequiredCredentials (false);
-        const market = (symbol !== undefined) ? this.market (symbol) : undefined;
+        const market = (symbol !== undefined) ? this.market (this.normalizeSymbol (symbol)) : undefined;
         const request: Dict = {};
         if (market) {
             request['market_addr'] = market['id'];
@@ -694,7 +727,7 @@ export default class ekiden extends Exchange {
         if (symbol === undefined) {
             throw new ArgumentsRequired (this.id + ' fetchOrder() requires a symbol to be specified');
         }
-        const market = this.market (symbol);
+        const market = this.market (this.normalizeSymbol (symbol));
         const request: Dict = { 'market_addr': market['id'], 'per_page': 50 };
         const response = await this.v1PrivateGetUserOrders (this.extend (request, params));
         for (let i = 0; i < response.length; i++) {
@@ -710,7 +743,7 @@ export default class ekiden extends Exchange {
         // Ekiden requires signed intents over /api/v1/user/intent (Ed25519, Aptos-style BCS payload + nonce + seed)
         await this.loadMarkets ();
         this.checkRequiredCredentials (false);
-        const market = this.market (symbol);
+        const market = this.market (this.normalizeSymbol (symbol));
         const hasPayload = this.isValidSignedIntentParams (params, 'order_create');
         let request: Dict = {};
         if (hasPayload) {
@@ -752,7 +785,7 @@ export default class ekiden extends Exchange {
     async cancelOrder (id: string, symbol: Str = undefined, params = {}): Promise<Order> {
         await this.loadMarkets ();
         this.checkRequiredCredentials (false);
-        const market = (symbol !== undefined) ? this.market (symbol) : undefined;
+        const market = (symbol !== undefined) ? this.market (this.normalizeSymbol (symbol)) : undefined;
         const hasPayload = this.isValidSignedIntentParams (params, 'order_cancel');
         let request: Dict = {};
         if (hasPayload) {

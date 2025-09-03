@@ -14,6 +14,39 @@ var ed25519 = require('./static_dependencies/noble-curves/ed25519.js');
  * @augments Exchange
  */
 class ekiden extends ekiden$1["default"] {
+    normalizeSymbol(symbol) {
+        let s = symbol.toUpperCase();
+        if (s.indexOf('/') >= 0) {
+            const parts = s.split('/');
+            const leftRaw = parts[0];
+            const rightRaw = parts[1];
+            let left = leftRaw.replace(/-0x[a-f0-9]+$/i, '');
+            let right = rightRaw;
+            if (right === 'NONE') {
+                if (/-PERP$/i.test(left)) {
+                    left = left.replace(/-PERP$/i, '');
+                    right = 'USDC';
+                }
+                else if (left.indexOf('-') >= 0) {
+                    const idx = left.indexOf('-');
+                    const base = left.slice(0, idx);
+                    const quote = left.slice(idx + 1);
+                    left = base;
+                    right = quote;
+                }
+            }
+            s = left + '/' + right;
+        }
+        else {
+            s = s.replace(/-0x[a-f0-9]+$/i, '');
+            s = s.replace(/-PERP$/i, '/USDC');
+            if ((s.indexOf('/') < 0) && (s.indexOf('-') >= 0)) {
+                const idx = s.indexOf('-');
+                s = s.slice(0, idx) + '/' + s.slice(idx + 1);
+            }
+        }
+        return s;
+    }
     // --- Intent signing helpers (mirrors ts-sdk buildOrderPayload) ---
     intentSeed() {
         // Same SEED used in ts-sdk composeHexPayload
@@ -342,7 +375,8 @@ class ekiden extends ekiden$1["default"] {
         for (let i = 0; i < response.length; i++) {
             const market = response[i];
             const id = this.safeString(market, 'addr');
-            const symbol = this.safeString(market, 'symbol');
+            const rawSymbol = this.safeString(market, 'symbol');
+            const symbol = (rawSymbol !== undefined) ? this.normalizeSymbol(rawSymbol) : undefined;
             const baseId = this.safeString(market, 'base_addr');
             const quoteId = this.safeString(market, 'quote_addr');
             const baseDecimals = this.safeInteger(market, 'base_decimals');
@@ -417,7 +451,7 @@ class ekiden extends ekiden$1["default"] {
     }
     async fetchTrades(symbol, since = undefined, limit = undefined, params = {}) {
         await this.loadMarkets();
-        const market = this.market(symbol);
+        const market = this.market(this.normalizeSymbol(symbol));
         const request = {
             'market_addr': market['id'],
         };
@@ -431,7 +465,7 @@ class ekiden extends ekiden$1["default"] {
     }
     async fetchOrderBook(symbol, limit = undefined, params = {}) {
         await this.loadMarkets();
-        const market = this.market(symbol);
+        const market = this.market(this.normalizeSymbol(symbol));
         const request = { 'market_addr': market['id'] };
         if (limit !== undefined) {
             request['per_page'] = limit;
@@ -535,7 +569,7 @@ class ekiden extends ekiden$1["default"] {
     }
     async fetchOHLCV(symbol, timeframe = '1h', since = undefined, limit = undefined, params = {}) {
         await this.loadMarkets();
-        const market = this.market(symbol);
+        const market = this.market(this.normalizeSymbol(symbol));
         const request = {
             'market_addr': market['id'],
             'timeframe': timeframe,
@@ -552,7 +586,7 @@ class ekiden extends ekiden$1["default"] {
     }
     async fetchTicker(symbol, params = {}) {
         await this.loadMarkets();
-        const market = this.market(symbol);
+        const market = this.market(this.normalizeSymbol(symbol));
         const response = await this.v1PublicGetMarketCandlesStatsMarketAddr(this.extend({ 'market_addr': market['id'] }, params));
         // MarketStatsResponse: current_price, price_24h_ago, price_change_24h, high_24h, low_24h, volume_24h, trades_24h
         const last = this.safeNumber(response, 'current_price');
@@ -642,7 +676,7 @@ class ekiden extends ekiden$1["default"] {
     async fetchOpenOrders(symbol = undefined, since = undefined, limit = undefined, params = {}) {
         await this.loadMarkets();
         this.checkRequiredCredentials(false);
-        const market = (symbol !== undefined) ? this.market(symbol) : undefined;
+        const market = (symbol !== undefined) ? this.market(this.normalizeSymbol(symbol)) : undefined;
         const request = {};
         if (market) {
             request['market_addr'] = market['id'];
@@ -657,7 +691,7 @@ class ekiden extends ekiden$1["default"] {
     async fetchClosedOrders(symbol = undefined, since = undefined, limit = undefined, params = {}) {
         await this.loadMarkets();
         this.checkRequiredCredentials(false);
-        const market = (symbol !== undefined) ? this.market(symbol) : undefined;
+        const market = (symbol !== undefined) ? this.market(this.normalizeSymbol(symbol)) : undefined;
         const request = {};
         if (market) {
             request['market_addr'] = market['id'];
@@ -675,7 +709,7 @@ class ekiden extends ekiden$1["default"] {
         if (symbol === undefined) {
             throw new errors.ArgumentsRequired(this.id + ' fetchOrder() requires a symbol to be specified');
         }
-        const market = this.market(symbol);
+        const market = this.market(this.normalizeSymbol(symbol));
         const request = { 'market_addr': market['id'], 'per_page': 50 };
         const response = await this.v1PrivateGetUserOrders(this.extend(request, params));
         for (let i = 0; i < response.length; i++) {
@@ -690,7 +724,7 @@ class ekiden extends ekiden$1["default"] {
         // Ekiden requires signed intents over /api/v1/user/intent (Ed25519, Aptos-style BCS payload + nonce + seed)
         await this.loadMarkets();
         this.checkRequiredCredentials(false);
-        const market = this.market(symbol);
+        const market = this.market(this.normalizeSymbol(symbol));
         const hasPayload = this.isValidSignedIntentParams(params, 'order_create');
         let request = {};
         if (hasPayload) {
@@ -732,7 +766,7 @@ class ekiden extends ekiden$1["default"] {
     async cancelOrder(id, symbol = undefined, params = {}) {
         await this.loadMarkets();
         this.checkRequiredCredentials(false);
-        const market = (symbol !== undefined) ? this.market(symbol) : undefined;
+        const market = (symbol !== undefined) ? this.market(this.normalizeSymbol(symbol)) : undefined;
         const hasPayload = this.isValidSignedIntentParams(params, 'order_cancel');
         let request = {};
         if (hasPayload) {

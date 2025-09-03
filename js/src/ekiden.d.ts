@@ -5,6 +5,7 @@ import type { Market, OHLCV, Order, Int, Ticker, Num, OrderSide, OrderType, Dict
  * @augments Exchange
  */
 export default class ekiden extends Exchange {
+    protected normalizeSymbol(symbol: string): string;
     protected intentSeed(): Uint8Array;
     protected encodeUleb128(value: number): Uint8Array;
     protected encodeU64LE(value: number | bigint): Uint8Array;
