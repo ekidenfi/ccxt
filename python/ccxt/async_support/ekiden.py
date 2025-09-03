@@ -16,17 +16,36 @@ from ccxt.base.decimal_to_precision import DECIMAL_PLACES
 
 class ekiden(Exchange, ImplicitAPI):
 
+    def strip_addr_suffix_upper(self, value: str) -> str:
+        up = value.upper()
+        tag = '-0X'
+        idx = up.find(tag)
+        if idx >= 0:
+            hexPart = up[idx + len(tag):]
+            if hexPart and len(hexPart) > 0:
+                isHex = True
+                for j in range(0, len(hexPart)):
+                    ch = hexPart[j]
+                    isDigit = (ch >= '0') and (ch <= '9')
+                    isAF = (ch >= 'A') and (ch <= 'F')
+                    if not isDigit and not isAF:
+                        isHex = False
+                        break
+                if isHex:
+                    return value[0:idx]
+        return value
+
     def normalize_symbol(self, symbol: str) -> str:
         s = symbol.upper()
         if s.find('/') >= 0:
             parts = s.split('/')
             leftRaw = parts[0]
             rightRaw = parts[1]
-            left = leftRaw.replace(/-0x[a-f0-9]+$/i, '')
+            left = self.strip_addr_suffix_upper(leftRaw)
             right = rightRaw
             if right == 'NONE':
-                if /-PERP$/i.test(left):
-                    left = left.replace(/-PERP$/i, '')
+                if left.endswith('-PERP'):
+                    left = left[0:len(left) - 5]
                     right = 'USDC'
                 elif left.find('-') >= 0:
                     idx = left.find('-')
@@ -36,97 +55,89 @@ class ekiden(Exchange, ImplicitAPI):
                     right = quote
             s = left + '/' + right
         else:
-            s = s.replace(/-0x[a-f0-9]+$/i, '')
-            s = s.replace(/-PERP$/i, '/USDC')
+            s = self.strip_addr_suffix_upper(s)
+            if s.endswith('-PERP'):
+                s = s[0:len(s) - 5] + '/USDC'
             if (s.find('/') < 0) and (s.find('-') >= 0):
                 idx = s.find('-')
                 s = s[0:idx] + '/' + s[idx + 1:]
         return s
 
-    def intent_seed(self) -> Uint8Array:
+    def intent_seed_hex(self) -> str:
         # Same SEED used in ts-sdk composeHexPayload
-        return new Uint8Array([226, 172, 78, 86, 136, 217, 100, 39, 10, 216, 118, 215, 96, 194, 235, 178, 213, 79, 178, 109, 147, 81, 44, 121, 0, 73, 182, 88, 55, 48, 208, 111])
+        return 'e2ac4e5688d964270ad876d760c2ebb2d54fb26d93512c790049b6583730d06f'
 
-    def encode_uleb128(self, value: float) -> Uint8Array:
-        out: List[number] = []
-        v = value
+    def serialize_string_hex(self, value: str) -> str:
+        bin = self.encode(value)
+        # Build ULEB128 length manually using numberToLE for cross-language compatibility
+        length = self.binary_length(bin)
+        v = length
+        ulebHex = ''
         while(v >= 0x80):
             low7 = v % 128
-            out.append(low7 + 0x80)
+            byteVal = low7 + 0x80
+            ulebHex += self.binary_to_base16(self.number_to_le(byteVal, 1))
             v = int(math.floor(v / 0x80))
-        out.append(v)
-        return new Uint8Array(out)
+        ulebHex += self.binary_to_base16(self.number_to_le(v, 1))
+        dataHex = self.binary_to_base16(bin)
+        return ulebHex + dataHex
 
-    def encode_u64_le(self, value: float | bigint) -> Uint8Array:
-        x = BigInt(value)
-        out = Uint8Array(8)
-        for i in range(0, 8):
-            divisor = 256n ** BigInt(i)
-            out[i] = Number((x / divisor) % 256n)
-        return out
+    def encode_uleb128_length(self, len: float) -> str:
+        v = len
+        uleb = ''
+        while(v >= 0x80):
+            low7 = v % 128
+            byteVal = low7 + 0x80
+            uleb += self.binary_to_base16(self.number_to_le(byteVal, 1))
+            v = int(math.floor(v / 0x80))
+        uleb += self.binary_to_base16(self.number_to_le(v, 1))
+        return uleb
 
-    def concat_bytes(self, arrays: List[Uint8Array]) -> Uint8Array:
-        total = arrays.reduce((acc, a) => acc + len(a), 0)
-        out = Uint8Array(total)
-        offset = 0
-        for i in range(0, len(arrays)):
-            out.set(arrays[i], offset)
-            offset += len(arrays[i])
-        return out
-
-    def serialize_string(self, value: str) -> Uint8Array:
-        enc = TextEncoder()
-        bytes = enc.encode(value)
-        return self.concat_bytes([self.encode_uleb128(len(bytes)), bytes])
-
-    def serialize_action_payload(self, payload: dict) -> Uint8Array:
+    def serialize_action_payload_hex(self, payload: dict) -> str:
         # Mirrors ts-sdk/src/utils/buildOrderPayload.ts
-        chunks: List[Uint8Array] = [self.serialize_string(self.safe_string(payload, 'type'))]
+        out = self.serialize_string_hex(self.safe_string(payload, 'type'))
         if payload['type'] == 'leverage_assign':
-            chunks.append(self.encode_u64_le(BigInt(self.safe_integer(payload, 'leverage'))))
-            chunks.append(self.serialize_string(self.safe_string(payload, 'market_addr')))
+            out += self.binary_to_base16(self.number_to_le(self.safe_integer(payload, 'leverage'), 8))
+            out += self.serialize_string_hex(self.safe_string(payload, 'market_addr'))
         elif payload['type'] == 'order_cancel':
             cancels = payload['cancels'] or []
-            chunks.append(self.encode_uleb128(len(cancels)))
+            # uleb128 length
+            lenHex = self.encode_uleb128_length(len(cancels))
+            out += lenHex
             for i in range(0, len(cancels)):
-                chunks.append(self.serialize_string(self.safe_string(cancels[i], 'sid')))
+                out += self.serialize_string_hex(self.safe_string(cancels[i], 'sid'))
         elif payload['type'] == 'order_create':
             orders = payload['orders'] or []
-            chunks.append(self.encode_uleb128(len(orders)))
+            # uleb128 length
+            lenHex = self.encode_uleb128_length(len(orders))
+            out += lenHex
             for i in range(0, len(orders)):
                 o = orders[i]
-                chunks.append(self.serialize_string(self.safe_string(o, 'side')))
-                chunks.append(self.encode_u64_le(BigInt(self.safe_integer(o, 'size'))))
-                chunks.append(self.encode_u64_le(BigInt(self.safe_integer(o, 'price'))))
-                chunks.append(self.encode_u64_le(BigInt(self.safe_integer(o, 'leverage'))))
-                chunks.append(self.serialize_string(self.safe_string(o, 'type')))
-                chunks.append(self.serialize_string(self.safe_string(o, 'market_addr')))
+                out += self.serialize_string_hex(self.safe_string(o, 'side'))
+                out += self.binary_to_base16(self.number_to_le(self.safe_integer(o, 'size'), 8))
+                out += self.binary_to_base16(self.number_to_le(self.safe_integer(o, 'price'), 8))
+                out += self.binary_to_base16(self.number_to_le(self.safe_integer(o, 'leverage'), 8))
+                out += self.serialize_string_hex(self.safe_string(o, 'type'))
+                out += self.serialize_string_hex(self.safe_string(o, 'market_addr'))
         else:
             raise NotSupported(self.id + ' unsupported payload type: ' + payload['type'])
-        return self.concat_bytes(chunks)
+        return out
 
-    def build_message(self, payloadBytes: Uint8Array, nonce: float) -> Uint8Array:
-        return self.concat_bytes([self.intent_seed(), payloadBytes, self.encode_u64_le(BigInt(nonce))])
+    def build_message_hex(self, payloadHex: str, nonce: float) -> str:
+        return self.intent_seed_hex() + payloadHex + self.binary_to_base16(self.number_to_le(nonce, 8))
 
-    def bytes_to_hex(self, arr: Uint8Array) -> str:
-        hex: List[str] = Array(len(arr))
-        for i in range(0, len(arr)):
-            hex[i] = arr[i].toString(16).rjust(2, '0')
-        return '0x' + ''.join(hex)
-
-    def sign_message(self, message: Uint8Array) -> str:
-        privateKeyHex = self.privateKey
-        value = privateKeyHex[2:] if privateKeyHex.startswith('0x') else privateKeyHex
-        pk = Uint8Array(len(value) / 2)
-        for i in range(0, len(pk)):
-            pk[i] = int(value[i * 2:i * 2 + 2], 16)
-        sig = ed25519.sign(message, pk)
-        return self.bytes_to_hex(sig)
+    def sign_message_hex(self, messageHex: str) -> str:
+        msgBin = self.base16_to_binary(messageHex)
+        pkHex = self.privateKey[2:] if self.privateKey.startswith('0x') else self.privateKey
+        secret = self.base16_to_binary(pkHex)
+        sigB64 = self.eddsa(msgBin, secret, 'ed25519')
+        sigHex = self.binary_to_base16(self.base64_to_binary(sigB64))
+        return '0x' + sigHex
 
     def build_signed_intent(self, payload: dict, nonce: float) -> dict:
-        payloadBytes = self.serialize_action_payload(payload)
-        message = self.build_message(payloadBytes, nonce)
-        signature = self.sign_message(message)
+        payloadHex = self.serialize_action_payload_hex(payload)
+        messageHex = self.build_message_hex(payloadHex, nonce)
+        signature = self.sign_message_hex(messageHex)
         return {'payload': payload, 'nonce': nonce, 'signature': signature}
 
     def is_valid_signed_intent_params(self, params: dict, expectedType: str = None) -> bool:
@@ -137,7 +148,7 @@ class ekiden(Exchange, ImplicitAPI):
         hasType = (payloadType is not None)
         typeOk = True if (expectedType is None) else (payloadType == expectedType)
         sigOk = (sig is not None) and (len(sig) > 2)
-        return not !(payload and hasType and typeOk and sigOk and hasNonce)
+        return(payload is not None) and hasType and typeOk and sigOk and hasNonce
 
     def scale_order_fields(self, market: Market, side: OrderSide, amount: float, price: Num, type: OrderType, leverage: float) -> dict:
         baseDecimals = self.safe_integer(market['info'] or {}, 'base_decimals')
@@ -167,14 +178,16 @@ class ekiden(Exchange, ImplicitAPI):
                     id = sid
         ts = self.safe_integer(response, 'timestamp')
         timestamp = (ts * 1000) if (ts is not None) else None
-        return self.iso8601(timestamp) if self.safe_order({
+        datetime = self.iso8601(timestamp)
+        symbolOut = market['symbol'] if market else None
+        return self.safe_order({
             'id': id,
             'clientOrderId': None,
             'timestamp': timestamp,
-            'datetime': (timestamp is not None) else None,
+            'datetime': datetime,
             'lastTradeTimestamp': None,
             'status': 'canceled',
-            'symbol': market['symbol'] if market else None,
+            'symbol': symbolOut,
             'type': None,
             'timeInForce': None,
             'postOnly': None,
@@ -208,15 +221,16 @@ class ekiden(Exchange, ImplicitAPI):
             id = self.safe_string(response, 'sid')
         ts = self.safe_integer(response, 'timestamp')
         timestamp = (ts * 1000) if (ts is not None) else None
-        # Best-effort mapped order
-        return self.iso8601(timestamp) if self.safe_order({
+        datetime = self.iso8601(timestamp)
+        symbolOut = market['symbol'] if market else None
+        return self.safe_order({
             'id': id,
             'clientOrderId': None,
             'timestamp': timestamp,
-            'datetime': (timestamp is not None) else None,
+            'datetime': datetime,
             'lastTradeTimestamp': None,
             'status': 'open',
-            'symbol': market['symbol'] if market else None,
+            'symbol': symbolOut,
             'type': type,
             'timeInForce': None,
             'postOnly': None,
@@ -399,15 +413,16 @@ class ekiden(Exchange, ImplicitAPI):
         priceInt = self.safe_integer(trade, 'price')
         amount = None
         price = None
+        datetime = self.iso8601(timestamp) if (timestamp is not None) else None
         if baseDecimals is not None and sizeInt is not None:
             amount = sizeInt / math.pow(10, baseDecimals)
         if quoteDecimals is not None and priceInt is not None:
             price = priceInt / math.pow(10, quoteDecimals)
         cost = (amount * price) if (amount is not None and price is not None) else None
-        return self.iso8601(timestamp) if self.safe_trade({
+        return self.safe_trade({
             'id': id,
             'timestamp': timestamp,
-            'datetime': (timestamp is not None) else None,
+            'datetime': datetime,
             'symbol': market['symbol'] if market else None,
             'side': side,
             'order': None,
@@ -457,15 +472,25 @@ class ekiden(Exchange, ImplicitAPI):
             if sizeFloat is None:
                 continue
             if side == 'buy':
-                bidsMap[key] = (bidsMap[key] or 0) + sizeFloat
+                prev = self.safe_number(bidsMap, key, 0)
+                bidsMap[key] = self.sum(prev, sizeFloat)
             elif side == 'sell':
-                asksMap[key] = (asksMap[key] or 0) + sizeFloat
-        bidsKeys = list(bidsMap).map((k) => self.parse_to_numeric(k).keys())
-        asksKeys = list(asksMap).map((k) => self.parse_to_numeric(k).keys())
-        # Convert price ints to floats using quote decimals
-        toFloatPrice = (p: number) =>(p / math.pow(10, quoteDecimals)) if ((quoteDecimals is not None) else p)
-        bids = bidsKeys.sort((a, b) => b - a).map((p) => [toFloatPrice(p), str(bidsMap[p)]])
-        asks = asksKeys.sort((a, b) => a - b).map((p) => [toFloatPrice(p), str(asksMap[p)]])
+                prev = self.safe_number(asksMap, key, 0)
+                asksMap[key] = self.sum(prev, sizeFloat)
+        bids = []
+        asks = []
+        bidKeys = list(bidsMap.keys())
+        for i in range(0, len(bidKeys)):
+            k = bidKeys[i]
+            pInt = self.parse_to_numeric(k)
+            pFloat = (pInt / math.pow(10, quoteDecimals)) if (quoteDecimals is not None) else pInt
+            bids.append([pFloat, bidsMap[k]])
+        askKeys = list(asksMap.keys())
+        for i in range(0, len(askKeys)):
+            k = askKeys[i]
+            pInt = self.parse_to_numeric(k)
+            pFloat = (pInt / math.pow(10, quoteDecimals)) if (quoteDecimals is not None) else pInt
+            asks.append([pFloat, asksMap[k]])
         orderbook = {'bids': bids, 'asks': asks}
         result = self.parse_order_book(orderbook, symbol)
         if limit is not None:
@@ -475,21 +500,24 @@ class ekiden(Exchange, ImplicitAPI):
 
     async def fetch_balance(self, params={}) -> Balances:
         # Derive balances from user portfolio endpoint; assumes a single quote asset vault(e.g., USDC)
-        self.check_required_credentials(False)
+        self.check_required_credentials()
         response = await self.request('user/portfolio', ['v1', 'private'], 'GET', params)
         # response: PortfolioResponse {vault_balances: [{asset_addr, balance}], summary: {total_margin_used}}
         vaults = self.safe_value(response, 'vault_balances', [])
         summary = self.safe_value(response, 'summary', {})
         # Try to detect decimals from markets using the first vault asset
         await self.load_markets()
-        decimals: number = None
+        decimals = None
         code: str = 'USDC'
         if len(vaults) > 0:
             assetAddr = self.safe_string(vaults[0], 'asset_addr')
             # find any market where quoteId == assetAddr
             marketIds = list(self.markets_by_id or {}.keys())
             for i in range(0, len(marketIds)):
-                m = self.markets_by_id[marketIds[i]]
+                m: Any = self.markets_by_id[marketIds[i]]
+                # markets_by_id can map an id to an array of market dicts; use the first
+                if isinstance(m, list) and len(m) > 0:
+                    m = m[0]
                 info = (m['info'] or {}) if m else {}
                 quoteId = self.safe_string(info, 'quote_addr')
                 if quoteId == assetAddr:
@@ -501,11 +529,14 @@ class ekiden(Exchange, ImplicitAPI):
                         if len(parts) > 1:
                             code = parts[1].split(':')[0]
                     break
-        scale = (x: number) =>(x / math.pow(10, decimals)) if ((decimals is not None) else x)
         totalRaw = self.safe_integer(vaults[0] or {}, 'balance')
         usedRaw = self.safe_integer(summary, 'total_margin_used')
-        total = scale(totalRaw) if (totalRaw is not None) else None
-        used = scale(usedRaw) if (usedRaw is not None) else 0
+        total = None
+        if totalRaw is not None:
+            total = (totalRaw / math.pow(10, decimals)) if (decimals is not None) else totalRaw
+        used = 0
+        if usedRaw is not None:
+            used = (usedRaw / math.pow(10, decimals)) if (decimals is not None) else usedRaw
         free = (total - used) if (total is not None and used is not None) else None
         result: dict = {'info': response}
         result[code] = {
@@ -674,7 +705,11 @@ class ekiden(Exchange, ImplicitAPI):
         if hasPayload:
             commitProvided = self.safe_bool(params, 'commit', False)
             request = self.omit(params, ['commit'])
-            responseProvided = (await self.v1PrivatePostUserIntentCommit(request)) if commitProvided else (await self.v1PrivatePostUserIntent(request))
+            responseProvided = None
+            if commitProvided:
+                responseProvided = await self.v1PrivatePostUserIntentCommit(request)
+            else:
+                responseProvided = await self.v1PrivatePostUserIntent(request)
             return self.safe_order({'id': None, 'symbol': market['symbol'], 'info': responseProvided})
         if not self.privateKey:
             raise NotSupported(self.id + ' createOrder() requires either params {payload, signature, nonce} or exchange.privateKey to sign the intent')
@@ -684,7 +719,11 @@ class ekiden(Exchange, ImplicitAPI):
         payload: dict = {'type': 'order_create', 'orders': [order]}
         nonce = self.safe_integer(params, 'nonce') if ('nonce' in params) else self.milliseconds()
         request = self.build_signed_intent(payload, nonce)
-        responseSigned = (await self.v1PrivatePostUserIntentCommit(request)) if commitFlag else (await self.v1PrivatePostUserIntent(request))
+        responseSigned = None
+        if commitFlag:
+            responseSigned = await self.v1PrivatePostUserIntentCommit(request)
+        else:
+            responseSigned = await self.v1PrivatePostUserIntent(request)
         # If committed, try to resolve the final order from user/orders by seq
         if commitFlag:
             seq = self.safe_integer(responseSigned, 'seq')
@@ -697,6 +736,8 @@ class ekiden(Exchange, ImplicitAPI):
                             return self.parse_order(it, market)
                 except Exception as e:
                     # ignore and fallback below
+                    # eslint-disable-next-line no-unused-vars
+                    _ = e  # no-op to satisfy transpilers
         return self.parse_create_order_result(responseSigned, payload, market, amount, price, side, type)
 
     async def cancel_order(self, id: str, symbol: Str = None, params={}) -> Order:
@@ -708,7 +749,11 @@ class ekiden(Exchange, ImplicitAPI):
         if hasPayload:
             commitProvided = self.safe_bool(params, 'commit', False)
             request = self.omit(params, ['commit'])
-            responseProvided = (await self.v1PrivatePostUserIntentCommit(request)) if commitProvided else (await self.v1PrivatePostUserIntent(request))
+            responseProvided = None
+            if commitProvided:
+                responseProvided = await self.v1PrivatePostUserIntentCommit(request)
+            else:
+                responseProvided = await self.v1PrivatePostUserIntent(request)
             return self.parse_cancel_order_result(responseProvided, id, market)
         if not self.privateKey:
             raise NotSupported(self.id + ' cancelOrder() requires either params {payload, signature, nonce} or exchange.privateKey to sign the intent')
@@ -717,5 +762,9 @@ class ekiden(Exchange, ImplicitAPI):
         payload: dict = {'type': 'order_cancel', 'cancels': [{'sid': id}]}
         nonce = self.safe_integer(params, 'nonce') if ('nonce' in params) else self.milliseconds()
         request = self.build_signed_intent(payload, nonce)
-        responseSigned = (await self.v1PrivatePostUserIntentCommit(request)) if commitFlag else (await self.v1PrivatePostUserIntent(request))
-        return self.parse_cancel_order_result(responseSigned, id, market)
+        responseSigned2 = None
+        if commitFlag:
+            responseSigned2 = await self.v1PrivatePostUserIntentCommit(request)
+        else:
+            responseSigned2 = await self.v1PrivatePostUserIntent(request)
+        return self.parse_cancel_order_result(responseSigned2, id, market)

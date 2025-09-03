@@ -5,21 +5,19 @@ import type { Market, OHLCV, Order, Int, Ticker, Num, OrderSide, OrderType, Dict
  * @augments Exchange
  */
 export default class ekiden extends Exchange {
-    protected normalizeSymbol(symbol: string): string;
-    protected intentSeed(): Uint8Array;
-    protected encodeUleb128(value: number): Uint8Array;
-    protected encodeU64LE(value: number | bigint): Uint8Array;
-    protected concatBytes(arrays: Uint8Array[]): Uint8Array;
-    protected serializeString(value: string): Uint8Array;
-    protected serializeActionPayload(payload: Dict): Uint8Array;
-    protected buildMessage(payloadBytes: Uint8Array, nonce: number): Uint8Array;
-    protected bytesToHex(arr: Uint8Array): string;
-    protected signMessage(message: Uint8Array): string;
-    protected buildSignedIntent(payload: Dict, nonce: number): Dict;
-    protected isValidSignedIntentParams(params: Dict, expectedType?: string): boolean;
-    protected scaleOrderFields(market: Market, side: OrderSide, amount: number, price: Num, type: OrderType, leverage: number): Dict;
-    protected parseCancelOrderResult(response: Dict, requestedId: string, market?: Market): Order;
-    protected parseCreateOrderResult(response: Dict, payload: Dict, market: Market, amount: number, price: Num, side: OrderSide, type: OrderType): Order;
+    stripAddrSuffixUpper(value: string): string;
+    normalizeSymbol(symbol: string): string;
+    intentSeedHex(): string;
+    serializeStringHex(value: string): string;
+    private encodeUleb128Length;
+    serializeActionPayloadHex(payload: Dict): string;
+    buildMessageHex(payloadHex: string, nonce: number): string;
+    signMessageHex(messageHex: string): string;
+    buildSignedIntent(payload: Dict, nonce: number): Dict;
+    isValidSignedIntentParams(params: Dict, expectedType?: string): boolean;
+    scaleOrderFields(market: Market, side: OrderSide, amount: number, price: Num, type: OrderType, leverage: number): Dict;
+    parseCancelOrderResult(response: Dict, requestedId: string, market?: Market): Order;
+    parseCreateOrderResult(response: Dict, payload: Dict, market: Market, amount: number, price: Num, side: OrderSide, type: OrderType): Order;
     describe(): any;
     sign(path: any, api?: any[], method?: string, params?: {}, headers?: any, body?: any): {
         url: string;

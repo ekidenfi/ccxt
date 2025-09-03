@@ -10,17 +10,42 @@ use ccxt\abstract\ekiden as Exchange;
 
 class ekiden extends Exchange {
 
+    public function strip_addr_suffix_upper(string $value): string {
+        $up = strtoupper($value);
+        $tag = '-0X';
+        $idx = mb_strpos($up, $tag);
+        if ($idx >= 0) {
+            $hexPart = mb_substr($up, $idx . strlen($tag));
+            if ($hexPart && strlen($hexPart) > 0) {
+                $isHex = true;
+                for ($j = 0; $j < count($hexPart); $j++) {
+                    $ch = $hexPart[$j];
+                    $isDigit = ($ch >= '0') && ($ch <= '9');
+                    $isAF = ($ch >= 'A') && ($ch <= 'F');
+                    if (!$isDigit && !$isAF) {
+                        $isHex = false;
+                        break;
+                    }
+                }
+                if ($isHex) {
+                    return mb_substr($value, 0, $idx - 0);
+                }
+            }
+        }
+        return $value;
+    }
+
     public function normalize_symbol(string $symbol): string {
         $s = strtoupper($symbol);
         if (mb_strpos($s, '/') !== false) {
             $parts = explode('/', $s);
             $leftRaw = $parts[0];
             $rightRaw = $parts[1];
-            $left = str_replace(/-0x[a-f0-9]+$/i, '', $leftRaw);
+            $left = $this->strip_addr_suffix_upper($leftRaw);
             $right = $rightRaw;
             if ($right === 'NONE') {
-                if (/-PERP$/i.test ($left)) {
-                    $left = str_replace(/-PERP$/i, '', $left);
+                if (str_ends_with($left, '-PERP')) {
+                    $left = mb_substr($left, 0, strlen($left) - 5 - 0);
                     $right = 'USDC';
                 } elseif (mb_strpos($left, '-') !== false) {
                     $idx = mb_strpos($left, '-');
@@ -32,8 +57,10 @@ class ekiden extends Exchange {
             }
             $s = $left . '/' . $right;
         } else {
-            $s = str_replace(/-0x[a-f0-9]+$/i, '', $s);
-            $s = str_replace(/-PERP$/i, '/USDC', $s);
+            $s = $this->strip_addr_suffix_upper($s);
+            if (str_ends_with($s, '-PERP')) {
+                $s = mb_substr($s, 0, strlen($s) - 5 - 0) . '/USDC';
+            }
             if ((mb_strpos($s, '/') === false) && (mb_strpos($s, '-') !== false)) {
                 $idx = mb_strpos($s, '-');
                 $s = mb_substr($s, 0, $idx - 0) . '/' . mb_substr($s, $idx + 1);
@@ -43,107 +70,92 @@ class ekiden extends Exchange {
     }
     }
 
-    public function intent_seed(): Uint8Array {
+    public function intent_seed_hex(): string {
         // Same SEED used in ts-sdk composeHexPayload
-        return new Uint8Array (array( 226, 172, 78, 86, 136, 217, 100, 39, 10, 216, 118, 215, 96, 194, 235, 178, 213, 79, 178, 109, 147, 81, 44, 121, 0, 73, 182, 88, 55, 48, 208, 111 ));
+        return 'e2ac4e5688d964270ad876d760c2ebb2d54fb26d93512c790049b6583730d06f';
     }
 
-    public function encode_uleb128(float $value): Uint8Array {
-        $out => numberarray() = array();
-        $v = $value;
+    public function serialize_string_hex(string $value): string {
+        $bin = $this->encode($value);
+        // Build ULEB128 $length manually using numberToLE for cross-language compatibility
+        $length = $this->binary_length($bin);
+        $v = $length;
+        $ulebHex = '';
         while ($v >= 0x80) {
             $low7 = fmod($v, 128);
-            $out[] = $low7 + 0x80;
+            $byteVal = $low7 + 0x80;
+            $ulebHex .= bin2hex($this->number_to_le($byteVal, 1));
             $v = (int) floor($v / 0x80);
         }
-        $out[] = $v;
-        return new Uint8Array ($out);
+        $ulebHex .= bin2hex($this->number_to_le($v, 1));
+        $dataHex = bin2hex($bin);
+        return $ulebHex . $dataHex;
     }
 
-    public function encode_u64_le(number | bigint $value): Uint8Array {
-        $x = BigInt ($value);
-        $out = new Uint8Array (8);
-        for ($i = 0; $i < 8; $i++) {
-            $divisor = 256n ** BigInt ($i);
-            $out[$i] = Number (($x / fmod($divisor), 256n));
+    public function encode_uleb128_length(float $len): string {
+        $v = $len;
+        $uleb = '';
+        while ($v >= 0x80) {
+            $low7 = fmod($v, 128);
+            $byteVal = $low7 + 0x80;
+            $uleb .= bin2hex($this->number_to_le($byteVal, 1));
+            $v = (int) floor($v / 0x80);
         }
-        return $out;
+        $uleb .= bin2hex($this->number_to_le($v, 1));
+        return $uleb;
     }
 
-    public function concat_bytes(array $arrays): Uint8Array {
-        $total = $arrays->reduce ((acc, a) => acc . strlen(a), 0);
-        $out = new Uint8Array ($total);
-        $offset = 0;
-        for ($i = 0; $i < count($arrays); $i++) {
-            $out->set ($arrays[$i], $offset);
-            $offset .= count($arrays[$i]);
-        }
-        return $out;
-    }
-
-    public function serialize_string(string $value): Uint8Array {
-        $enc = new TextEncoder ();
-        $bytes = $enc->encode ($value);
-        return $this->concat_bytes(array( $this->encode_uleb128(strlen($bytes)), $bytes ));
-    }
-
-    public function serialize_action_payload(array $payload): Uint8Array {
+    public function serialize_action_payload_hex(array $payload): string {
         // Mirrors ts-sdk/src/utils/buildOrderPayload.ts
-        $chunks => Uint8Arrayarray() = array( $this->serialize_string($this->safe_string($payload, 'type')) );
+        $out = $this->serialize_string_hex($this->safe_string($payload, 'type'));
         if ($payload['type'] === 'leverage_assign') {
-            $chunks[] = $this->encode_u64_le(BigInt ($this->safe_integer($payload, 'leverage')));
-            $chunks[] = $this->serialize_string($this->safe_string($payload, 'market_addr'));
+            $out .= bin2hex($this->number_to_le($this->safe_integer($payload, 'leverage'), 8));
+            $out .= $this->serialize_string_hex($this->safe_string($payload, 'market_addr'));
         } elseif ($payload['type'] === 'order_cancel') {
             $cancels = $payload['cancels'] || array();
-            $chunks[] = $this->encode_uleb128(strlen($cancels));
+            // uleb128 length
+            $lenHex = $this->encode_uleb128_length(strlen($cancels));
+            $out .= $lenHex;
             for ($i = 0; $i < count($cancels); $i++) {
-                $chunks[] = $this->serialize_string($this->safe_string($cancels[$i], 'sid'));
+                $out .= $this->serialize_string_hex($this->safe_string($cancels[$i], 'sid'));
             }
         } elseif ($payload['type'] === 'order_create') {
             $orders = $payload['orders'] || array();
-            $chunks[] = $this->encode_uleb128(strlen($orders));
+            // uleb128 length
+            $lenHex = $this->encode_uleb128_length(strlen($orders));
+            $out .= $lenHex;
             for ($i = 0; $i < count($orders); $i++) {
                 $o = $orders[$i];
-                $chunks[] = $this->serialize_string($this->safe_string($o, 'side'));
-                $chunks[] = $this->encode_u64_le(BigInt ($this->safe_integer($o, 'size')));
-                $chunks[] = $this->encode_u64_le(BigInt ($this->safe_integer($o, 'price')));
-                $chunks[] = $this->encode_u64_le(BigInt ($this->safe_integer($o, 'leverage')));
-                $chunks[] = $this->serialize_string($this->safe_string($o, 'type'));
-                $chunks[] = $this->serialize_string($this->safe_string($o, 'market_addr'));
+                $out .= $this->serialize_string_hex($this->safe_string($o, 'side'));
+                $out .= bin2hex($this->number_to_le($this->safe_integer($o, 'size'), 8));
+                $out .= bin2hex($this->number_to_le($this->safe_integer($o, 'price'), 8));
+                $out .= bin2hex($this->number_to_le($this->safe_integer($o, 'leverage'), 8));
+                $out .= $this->serialize_string_hex($this->safe_string($o, 'type'));
+                $out .= $this->serialize_string_hex($this->safe_string($o, 'market_addr'));
             }
         } else {
             throw new NotSupported($this->id . ' unsupported $payload type => ' . $payload['type']);
         }
-        return $this->concat_bytes($chunks);
+        return $out;
     }
 
-    public function build_message(Uint8Array $payloadBytes, float $nonce): Uint8Array {
-        return $this->concat_bytes(array( $this->intent_seed(), $payloadBytes, $this->encode_u64_le(BigInt ($nonce)) ));
+    public function build_message_hex(string $payloadHex, float $nonce): string {
+        return $this->intent_seed_hex() . $payloadHex . bin2hex($this->number_to_le($nonce, 8));
     }
 
-    public function bytes_to_hex(Uint8Array $arr): string {
-        $hex => stringarray() = new Array (strlen($arr));
-        for ($i = 0; $i < count($arr); $i++) {
-            $hex[$i] = $arr[$i].toString (16).padStart (2, '0');
-        }
-        return '0x' . implode('', $hex);
-    }
-
-    public function sign_message(Uint8Array $message): string {
-        $privateKeyHex = $this->privateKey;
-        $value = str_starts_with($privateKeyHex, '0x') ? mb_substr($privateKeyHex, 2) : $privateKeyHex;
-        $pk = new Uint8Array (strlen($value) / 2);
-        for ($i = 0; $i < count($pk); $i++) {
-            $pk[$i] = intval(mb_substr($value, $i * 2, $i * 2 + 2 - $i * 2), 16);
-        }
-        $sig = ed25519.sign ($message, $pk);
-        return $this->bytes_to_hex($sig);
+    public function sign_message_hex(string $messageHex): string {
+        $msgBin = $this->base16_to_binary($messageHex);
+        $pkHex = str_starts_with($this->privateKey, '0x') ? mb_substr($this->privateKey, 2) : $this->privateKey;
+        $secret = $this->base16_to_binary($pkHex);
+        $sigB64 = $this->eddsa($msgBin, $secret, 'ed25519');
+        $sigHex = bin2hex(base64_decode($sigB64));
+        return '0x' . $sigHex;
     }
 
     public function build_signed_intent(array $payload, float $nonce): array {
-        $payloadBytes = $this->serialize_action_payload($payload);
-        $message = $this->build_message($payloadBytes, $nonce);
-        $signature = $this->sign_message($message);
+        $payloadHex = $this->serialize_action_payload_hex($payload);
+        $messageHex = $this->build_message_hex($payloadHex, $nonce);
+        $signature = $this->sign_message_hex($messageHex);
         return array( 'payload' => $payload, 'nonce' => $nonce, 'signature' => $signature );
     }
 
@@ -155,7 +167,7 @@ class ekiden extends Exchange {
         $hasType = ($payloadType !== null);
         $typeOk = ($expectedType === null) ? true : ($payloadType === $expectedType);
         $sigOk = ($sig !== null) && (strlen($sig) > 2);
-        return !!($payload && $hasType && $typeOk && $sigOk && $hasNonce);
+        return ($payload !== null) && $hasType && $typeOk && $sigOk && $hasNonce;
     }
 
     public function scale_order_fields(array $market, string $side, float $amount, ?float $price, string $type, float $leverage): array {
@@ -190,14 +202,16 @@ class ekiden extends Exchange {
         }
         $ts = $this->safe_integer($response, 'timestamp');
         $timestamp = ($ts !== null) ? ($ts * 1000) : null;
+        $datetime = $this->iso8601($timestamp);
+        $symbolOut = $market ? $market['symbol'] : null;
         return $this->safe_order(array(
             'id' => $id,
             'clientOrderId' => null,
             'timestamp' => $timestamp,
-            'datetime' => ($timestamp !== null) ? $this->iso8601($timestamp) : null,
+            'datetime' => $datetime,
             'lastTradeTimestamp' => null,
             'status' => 'canceled',
-            'symbol' => $market ? $market['symbol'] : null,
+            'symbol' => $symbolOut,
             'type' => null,
             'timeInForce' => null,
             'postOnly' => null,
@@ -235,15 +249,16 @@ class ekiden extends Exchange {
         }
         $ts = $this->safe_integer($response, 'timestamp');
         $timestamp = ($ts !== null) ? ($ts * 1000) : null;
-        // Best-effort mapped order
+        $datetime = $this->iso8601($timestamp);
+        $symbolOut = $market ? $market['symbol'] : null;
         return $this->safe_order(array(
             'id' => $id,
             'clientOrderId' => null,
             'timestamp' => $timestamp,
-            'datetime' => ($timestamp !== null) ? $this->iso8601($timestamp) : null,
+            'datetime' => $datetime,
             'lastTradeTimestamp' => null,
             'status' => 'open',
-            'symbol' => $market ? $market['symbol'] : null,
+            'symbol' => $symbolOut,
             'type' => $type,
             'timeInForce' => null,
             'postOnly' => null,
@@ -435,6 +450,7 @@ class ekiden extends Exchange {
         $priceInt = $this->safe_integer($trade, 'price');
         $amount = null;
         $price = null;
+        $datetime = ($timestamp !== null) ? $this->iso8601($timestamp) : null;
         if ($baseDecimals !== null && $sizeInt !== null) {
             $amount = $sizeInt / pow(10, $baseDecimals);
         }
@@ -445,7 +461,7 @@ class ekiden extends Exchange {
         return $this->safe_trade(array(
             'id' => $id,
             'timestamp' => $timestamp,
-            'datetime' => ($timestamp !== null) ? $this->iso8601($timestamp) : null,
+            'datetime' => $datetime,
             'symbol' => $market ? $market['symbol'] : null,
             'side' => $side,
             'order' => null,
@@ -501,17 +517,29 @@ class ekiden extends Exchange {
                 continue;
             }
             if ($side === 'buy') {
-                $bidsMap[$key] = ($bidsMap[$key] || 0) . $sizeFloat;
+                $prev = $this->safe_number($bidsMap, $key, 0);
+                $bidsMap[$key] = $this->sum($prev, $sizeFloat);
             } elseif ($side === 'sell') {
-                $asksMap[$key] = ($asksMap[$key] || 0) . $sizeFloat;
+                $prev = $this->safe_number($asksMap, $key, 0);
+                $asksMap[$key] = $this->sum($prev, $sizeFloat);
             }
         }
-        $bidsKeys = is_array($bidsMap).map ((k) => $this->parse_to_numeric(k)) ? array_keys($bidsMap).map ((k) => $this->parse_to_numeric(k)) : array();
-        $asksKeys = is_array($asksMap).map ((k) => $this->parse_to_numeric(k)) ? array_keys($asksMap).map ((k) => $this->parse_to_numeric(k)) : array();
-        // Convert price ints to floats using quote decimals
-        $toFloatPrice = (p => number) => (($quoteDecimals !== null) ? (p / pow(10, $quoteDecimals)) : p);
-        $bids = $bidsKeys->sort ((a, b) => b - a).map ((p) => [ $toFloatPrice (p), (string) $bidsMap[p] ]);
-        $asks = $asksKeys->sort ((a, b) => a - b).map ((p) => [ $toFloatPrice (p), (string) $asksMap[p] ]);
+        $bids = array();
+        $asks = array();
+        $bidKeys = is_array($bidsMap) ? array_keys($bidsMap) : array();
+        for ($i = 0; $i < count($bidKeys); $i++) {
+            $k = $bidKeys[$i];
+            $pInt = $this->parse_to_numeric($k);
+            $pFloat = ($quoteDecimals !== null) ? ($pInt / pow(10, $quoteDecimals)) : $pInt;
+            $bids[] = [ $pFloat, $bidsMap[$k] ];
+        }
+        $askKeys = is_array($asksMap) ? array_keys($asksMap) : array();
+        for ($i = 0; $i < count($askKeys); $i++) {
+            $k = $askKeys[$i];
+            $pInt = $this->parse_to_numeric($k);
+            $pFloat = ($quoteDecimals !== null) ? ($pInt / pow(10, $quoteDecimals)) : $pInt;
+            $asks[] = [ $pFloat, $asksMap[$k] ];
+        }
         $orderbook = array( 'bids' => $bids, 'asks' => $asks );
         $result = $this->parse_order_book($orderbook, $symbol);
         if ($limit !== null) {
@@ -523,7 +551,7 @@ class ekiden extends Exchange {
 
     public function fetch_balance($params = array ()): array {
         // Derive balances from user portfolio endpoint; assumes a single quote asset vault (e.g., USDC)
-        $this->check_required_credentials(false);
+        $this->check_required_credentials();
         $response = $this->request('user/portfolio', array( 'v1', 'private' ), 'GET', $params);
         // $response => PortfolioResponse array( vault_balances => array( array( asset_addr, balance ) ), $summary => array( total_margin_used ) )
         $vaults = $this->safe_value($response, 'vault_balances', array());
@@ -538,6 +566,10 @@ class ekiden extends Exchange {
             $marketIds = is_array($this->markets_by_id || array()) ? array_keys($this->markets_by_id || array()) : array();
             for ($i = 0; $i < count($marketIds); $i++) {
                 $m = $this->markets_by_id[$marketIds[$i]];
+                // markets_by_id can map an id to an array of market dicts; use the first
+                if (gettype($m) === 'array' && array_keys($m) === array_keys(array_keys($m)) && strlen($m) > 0) {
+                    $m = $m[0];
+                }
                 $info = $m ? ($m['info'] || array()) : array();
                 $quoteId = $this->safe_string($info, 'quote_addr');
                 if ($quoteId === $assetAddr) {
@@ -554,11 +586,16 @@ class ekiden extends Exchange {
                 }
             }
         }
-        $scale = (x => number) => (($decimals !== null) ? (x / pow(10, $decimals)) : x);
         $totalRaw = $this->safe_integer($vaults[0] || array(), 'balance');
         $usedRaw = $this->safe_integer($summary, 'total_margin_used');
-        $total = ($totalRaw !== null) ? $scale ($totalRaw) : null;
-        $used = ($usedRaw !== null) ? $scale ($usedRaw) : 0;
+        $total = null;
+        if ($totalRaw !== null) {
+            $total = ($decimals !== null) ? ($totalRaw / pow(10, $decimals)) : $totalRaw;
+        }
+        $used = 0;
+        if ($usedRaw !== null) {
+            $used = ($decimals !== null) ? ($usedRaw / pow(10, $decimals)) : $usedRaw;
+        }
         $free = ($total !== null && $used !== null) ? ($total - $used) : null;
         $result = array( 'info' => $response );
         $result[$code] = array(
@@ -747,7 +784,12 @@ class ekiden extends Exchange {
         if ($hasPayload) {
             $commitProvided = $this->safe_bool($params, 'commit', false);
             $request = $this->omit($params, array( 'commit' ));
-            $responseProvided = $commitProvided ? (await $this->v1PrivatePostUserIntentCommit ($request)) : (await $this->v1PrivatePostUserIntent ($request));
+            $responseProvided = null;
+            if ($commitProvided) {
+                $responseProvided = $this->v1PrivatePostUserIntentCommit ($request);
+            } else {
+                $responseProvided = $this->v1PrivatePostUserIntent ($request);
+            }
             return $this->safe_order(array( 'id' => null, 'symbol' => $market['symbol'], 'info' => $responseProvided ));
         }
         if (!$this->privateKey) {
@@ -759,7 +801,12 @@ class ekiden extends Exchange {
         $payload = array( 'type' => 'order_create', 'orders' => array( $order ) );
         $nonce = (is_array($params) && array_key_exists('nonce', $params)) ? $this->safe_integer($params, 'nonce') : $this->milliseconds();
         $request = $this->build_signed_intent($payload, $nonce);
-        $responseSigned = $commitFlag ? (await $this->v1PrivatePostUserIntentCommit ($request)) : (await $this->v1PrivatePostUserIntent ($request));
+        $responseSigned = null;
+        if ($commitFlag) {
+            $responseSigned = $this->v1PrivatePostUserIntentCommit ($request);
+        } else {
+            $responseSigned = $this->v1PrivatePostUserIntent ($request);
+        }
         // If committed, try to resolve the final $order from user/orders by $seq
         if ($commitFlag) {
             $seq = $this->safe_integer($responseSigned, 'seq');
@@ -774,6 +821,8 @@ class ekiden extends Exchange {
                     }
                 } catch (Exception $e) {
                     // ignore and fallback below
+                    // eslint-disable-next-line no-unused-vars
+                    $_ = $e; // no-op to satisfy transpilers
                 }
             }
         }
@@ -789,7 +838,12 @@ class ekiden extends Exchange {
         if ($hasPayload) {
             $commitProvided = $this->safe_bool($params, 'commit', false);
             $request = $this->omit($params, array( 'commit' ));
-            $responseProvided = $commitProvided ? (await $this->v1PrivatePostUserIntentCommit ($request)) : (await $this->v1PrivatePostUserIntent ($request));
+            $responseProvided = null;
+            if ($commitProvided) {
+                $responseProvided = $this->v1PrivatePostUserIntentCommit ($request);
+            } else {
+                $responseProvided = $this->v1PrivatePostUserIntent ($request);
+            }
             return $this->parse_cancel_order_result($responseProvided, $id, $market);
         }
         if (!$this->privateKey) {
@@ -800,7 +854,12 @@ class ekiden extends Exchange {
         $payload = array( 'type' => 'order_cancel', 'cancels' => array( array( 'sid' => $id ) ) );
         $nonce = (is_array($params) && array_key_exists('nonce', $params)) ? $this->safe_integer($params, 'nonce') : $this->milliseconds();
         $request = $this->build_signed_intent($payload, $nonce);
-        $responseSigned = $commitFlag ? (await $this->v1PrivatePostUserIntentCommit ($request)) : (await $this->v1PrivatePostUserIntent ($request));
-        return $this->parse_cancel_order_result($responseSigned, $id, $market);
+        $responseSigned2 = null;
+        if ($commitFlag) {
+            $responseSigned2 = $this->v1PrivatePostUserIntentCommit ($request);
+        } else {
+            $responseSigned2 = $this->v1PrivatePostUserIntent ($request);
+        }
+        return $this->parse_cancel_order_result($responseSigned2, $id, $market);
     }
 }

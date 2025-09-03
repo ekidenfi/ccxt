@@ -116,7 +116,6 @@ class ekiden extends ekiden$1["default"] {
             }
         }
         catch (e) {
-            // swallow and retry
         }
         this.delay(pollMs, this.watchOrdersLoop, client, messageHash, market, params);
     }

@@ -9,23 +9,48 @@ import Exchange from './abstract/ekiden.js';
 import { DECIMAL_PLACES } from './base/functions/number.js';
 import { ArgumentsRequired, OrderNotFound, NotSupported } from './base/errors.js';
 import { ed25519 } from './static_dependencies/noble-curves/ed25519.js';
+import { eddsa } from './base/functions/crypto.js';
 //  ---------------------------------------------------------------------------
 /**
  * @class ekiden
  * @augments Exchange
  */
 export default class ekiden extends Exchange {
+    stripAddrSuffixUpper(value) {
+        const up = value.toUpperCase();
+        const tag = '-0X';
+        const idx = up.indexOf(tag);
+        if (idx >= 0) {
+            const hexPart = up.slice(idx + tag.length);
+            if (hexPart && hexPart.length > 0) {
+                let isHex = true;
+                for (let j = 0; j < hexPart.length; j++) {
+                    const ch = hexPart[j];
+                    const isDigit = (ch >= '0') && (ch <= '9');
+                    const isAF = (ch >= 'A') && (ch <= 'F');
+                    if (!isDigit && !isAF) {
+                        isHex = false;
+                        break;
+                    }
+                }
+                if (isHex) {
+                    return value.slice(0, idx);
+                }
+            }
+        }
+        return value;
+    }
     normalizeSymbol(symbol) {
         let s = symbol.toUpperCase();
         if (s.indexOf('/') >= 0) {
             const parts = s.split('/');
             const leftRaw = parts[0];
             const rightRaw = parts[1];
-            let left = leftRaw.replace(/-0x[a-f0-9]+$/i, '');
+            let left = this.stripAddrSuffixUpper(leftRaw);
             let right = rightRaw;
             if (right === 'NONE') {
-                if (/-PERP$/i.test(left)) {
-                    left = left.replace(/-PERP$/i, '');
+                if (left.endsWith('-PERP')) {
+                    left = left.slice(0, left.length - 5);
                     right = 'USDC';
                 }
                 else if (left.indexOf('-') >= 0) {
@@ -39,8 +64,10 @@ export default class ekiden extends Exchange {
             s = left + '/' + right;
         }
         else {
-            s = s.replace(/-0x[a-f0-9]+$/i, '');
-            s = s.replace(/-PERP$/i, '/USDC');
+            s = this.stripAddrSuffixUpper(s);
+            if (s.endsWith('-PERP')) {
+                s = s.slice(0, s.length - 5) + '/USDC';
+            }
             if ((s.indexOf('/') < 0) && (s.indexOf('-') >= 0)) {
                 const idx = s.indexOf('-');
                 s = s.slice(0, idx) + '/' + s.slice(idx + 1);
@@ -49,101 +76,89 @@ export default class ekiden extends Exchange {
         return s;
     }
     // --- Intent signing helpers (mirrors ts-sdk buildOrderPayload) ---
-    intentSeed() {
+    intentSeedHex() {
         // Same SEED used in ts-sdk composeHexPayload
-        return new Uint8Array([226, 172, 78, 86, 136, 217, 100, 39, 10, 216, 118, 215, 96, 194, 235, 178, 213, 79, 178, 109, 147, 81, 44, 121, 0, 73, 182, 88, 55, 48, 208, 111]);
+        return 'e2ac4e5688d964270ad876d760c2ebb2d54fb26d93512c790049b6583730d06f';
     }
-    encodeUleb128(value) {
-        const out = [];
-        let v = value;
+    serializeStringHex(value) {
+        const bin = this.encode(value);
+        // Build ULEB128 length manually using numberToLE for cross-language compatibility
+        const length = this.binaryLength(bin);
+        let v = length;
+        let ulebHex = '';
         while (v >= 0x80) {
             const low7 = v % 128;
-            out.push(low7 + 0x80);
+            const byteVal = low7 + 0x80;
+            ulebHex += this.binaryToBase16(this.numberToLE(byteVal, 1));
             v = Math.floor(v / 0x80);
         }
-        out.push(v);
-        return new Uint8Array(out);
+        ulebHex += this.binaryToBase16(this.numberToLE(v, 1));
+        const dataHex = this.binaryToBase16(bin);
+        return ulebHex + dataHex;
     }
-    encodeU64LE(value) {
-        const x = BigInt(value);
-        const out = new Uint8Array(8);
-        for (let i = 0; i < 8; i++) {
-            const divisor = 256n ** BigInt(i);
-            out[i] = Number((x / divisor) % 256n);
+    encodeUleb128Length(len) {
+        let v = len;
+        let uleb = '';
+        while (v >= 0x80) {
+            const low7 = v % 128;
+            const byteVal = low7 + 0x80;
+            uleb += this.binaryToBase16(this.numberToLE(byteVal, 1));
+            v = Math.floor(v / 0x80);
         }
-        return out;
+        uleb += this.binaryToBase16(this.numberToLE(v, 1));
+        return uleb;
     }
-    concatBytes(arrays) {
-        const total = arrays.reduce((acc, a) => acc + a.length, 0);
-        const out = new Uint8Array(total);
-        let offset = 0;
-        for (let i = 0; i < arrays.length; i++) {
-            out.set(arrays[i], offset);
-            offset += arrays[i].length;
-        }
-        return out;
-    }
-    serializeString(value) {
-        const enc = new TextEncoder();
-        const bytes = enc.encode(value);
-        return this.concatBytes([this.encodeUleb128(bytes.length), bytes]);
-    }
-    serializeActionPayload(payload) {
+    serializeActionPayloadHex(payload) {
         // Mirrors ts-sdk/src/utils/buildOrderPayload.ts
-        const chunks = [this.serializeString(this.safeString(payload, 'type'))];
+        let out = this.serializeStringHex(this.safeString(payload, 'type'));
         if (payload['type'] === 'leverage_assign') {
-            chunks.push(this.encodeU64LE(BigInt(this.safeInteger(payload, 'leverage'))));
-            chunks.push(this.serializeString(this.safeString(payload, 'market_addr')));
+            out += this.binaryToBase16(this.numberToLE(this.safeInteger(payload, 'leverage'), 8));
+            out += this.serializeStringHex(this.safeString(payload, 'market_addr'));
         }
         else if (payload['type'] === 'order_cancel') {
             const cancels = payload['cancels'] || [];
-            chunks.push(this.encodeUleb128(cancels.length));
+            // uleb128 length
+            const lenHex = this.encodeUleb128Length(cancels.length);
+            out += lenHex;
             for (let i = 0; i < cancels.length; i++) {
-                chunks.push(this.serializeString(this.safeString(cancels[i], 'sid')));
+                out += this.serializeStringHex(this.safeString(cancels[i], 'sid'));
             }
         }
         else if (payload['type'] === 'order_create') {
             const orders = payload['orders'] || [];
-            chunks.push(this.encodeUleb128(orders.length));
+            // uleb128 length
+            const lenHex = this.encodeUleb128Length(orders.length);
+            out += lenHex;
             for (let i = 0; i < orders.length; i++) {
                 const o = orders[i];
-                chunks.push(this.serializeString(this.safeString(o, 'side')));
-                chunks.push(this.encodeU64LE(BigInt(this.safeInteger(o, 'size'))));
-                chunks.push(this.encodeU64LE(BigInt(this.safeInteger(o, 'price'))));
-                chunks.push(this.encodeU64LE(BigInt(this.safeInteger(o, 'leverage'))));
-                chunks.push(this.serializeString(this.safeString(o, 'type')));
-                chunks.push(this.serializeString(this.safeString(o, 'market_addr')));
+                out += this.serializeStringHex(this.safeString(o, 'side'));
+                out += this.binaryToBase16(this.numberToLE(this.safeInteger(o, 'size'), 8));
+                out += this.binaryToBase16(this.numberToLE(this.safeInteger(o, 'price'), 8));
+                out += this.binaryToBase16(this.numberToLE(this.safeInteger(o, 'leverage'), 8));
+                out += this.serializeStringHex(this.safeString(o, 'type'));
+                out += this.serializeStringHex(this.safeString(o, 'market_addr'));
             }
         }
         else {
             throw new NotSupported(this.id + ' unsupported payload type: ' + payload['type']);
         }
-        return this.concatBytes(chunks);
+        return out;
     }
-    buildMessage(payloadBytes, nonce) {
-        return this.concatBytes([this.intentSeed(), payloadBytes, this.encodeU64LE(BigInt(nonce))]);
+    buildMessageHex(payloadHex, nonce) {
+        return this.intentSeedHex() + payloadHex + this.binaryToBase16(this.numberToLE(nonce, 8));
     }
-    bytesToHex(arr) {
-        const hex = new Array(arr.length);
-        for (let i = 0; i < arr.length; i++) {
-            hex[i] = arr[i].toString(16).padStart(2, '0');
-        }
-        return '0x' + hex.join('');
-    }
-    signMessage(message) {
-        const privateKeyHex = this.privateKey;
-        const value = privateKeyHex.startsWith('0x') ? privateKeyHex.slice(2) : privateKeyHex;
-        const pk = new Uint8Array(value.length / 2);
-        for (let i = 0; i < pk.length; i++) {
-            pk[i] = parseInt(value.slice(i * 2, i * 2 + 2), 16);
-        }
-        const sig = ed25519.sign(message, pk);
-        return this.bytesToHex(sig);
+    signMessageHex(messageHex) {
+        const msgBin = this.base16ToBinary(messageHex);
+        const pkHex = this.privateKey.startsWith('0x') ? this.privateKey.slice(2) : this.privateKey;
+        const secret = this.base16ToBinary(pkHex);
+        const sigB64 = eddsa(msgBin, secret, ed25519);
+        const sigHex = this.binaryToBase16(this.base64ToBinary(sigB64));
+        return '0x' + sigHex;
     }
     buildSignedIntent(payload, nonce) {
-        const payloadBytes = this.serializeActionPayload(payload);
-        const message = this.buildMessage(payloadBytes, nonce);
-        const signature = this.signMessage(message);
+        const payloadHex = this.serializeActionPayloadHex(payload);
+        const messageHex = this.buildMessageHex(payloadHex, nonce);
+        const signature = this.signMessageHex(messageHex);
         return { 'payload': payload, 'nonce': nonce, 'signature': signature };
     }
     isValidSignedIntentParams(params, expectedType = undefined) {
@@ -154,7 +169,7 @@ export default class ekiden extends Exchange {
         const hasType = (payloadType !== undefined);
         const typeOk = (expectedType === undefined) ? true : (payloadType === expectedType);
         const sigOk = (sig !== undefined) && (sig.length > 2);
-        return !!(payload && hasType && typeOk && sigOk && hasNonce);
+        return (payload !== undefined) && hasType && typeOk && sigOk && hasNonce;
     }
     scaleOrderFields(market, side, amount, price, type, leverage) {
         const baseDecimals = this.safeInteger(market['info'] || {}, 'base_decimals');
@@ -187,14 +202,16 @@ export default class ekiden extends Exchange {
         }
         const ts = this.safeInteger(response, 'timestamp');
         const timestamp = (ts !== undefined) ? (ts * 1000) : undefined;
+        const datetime = this.iso8601(timestamp);
+        const symbolOut = market ? market['symbol'] : undefined;
         return this.safeOrder({
             'id': id,
             'clientOrderId': undefined,
             'timestamp': timestamp,
-            'datetime': (timestamp !== undefined) ? this.iso8601(timestamp) : undefined,
+            'datetime': datetime,
             'lastTradeTimestamp': undefined,
             'status': 'canceled',
-            'symbol': market ? market['symbol'] : undefined,
+            'symbol': symbolOut,
             'type': undefined,
             'timeInForce': undefined,
             'postOnly': undefined,
@@ -231,15 +248,16 @@ export default class ekiden extends Exchange {
         }
         const ts = this.safeInteger(response, 'timestamp');
         const timestamp = (ts !== undefined) ? (ts * 1000) : undefined;
-        // Best-effort mapped order
+        const datetime = this.iso8601(timestamp);
+        const symbolOut = market ? market['symbol'] : undefined;
         return this.safeOrder({
             'id': id,
             'clientOrderId': undefined,
             'timestamp': timestamp,
-            'datetime': (timestamp !== undefined) ? this.iso8601(timestamp) : undefined,
+            'datetime': datetime,
             'lastTradeTimestamp': undefined,
             'status': 'open',
-            'symbol': market ? market['symbol'] : undefined,
+            'symbol': symbolOut,
             'type': type,
             'timeInForce': undefined,
             'postOnly': undefined,
@@ -427,6 +445,7 @@ export default class ekiden extends Exchange {
         const priceInt = this.safeInteger(trade, 'price');
         let amount = undefined;
         let price = undefined;
+        const datetime = (timestamp !== undefined) ? this.iso8601(timestamp) : undefined;
         if (baseDecimals !== undefined && sizeInt !== undefined) {
             amount = sizeInt / Math.pow(10, baseDecimals);
         }
@@ -437,7 +456,7 @@ export default class ekiden extends Exchange {
         return this.safeTrade({
             'id': id,
             'timestamp': timestamp,
-            'datetime': (timestamp !== undefined) ? this.iso8601(timestamp) : undefined,
+            'datetime': datetime,
             'symbol': market ? market['symbol'] : undefined,
             'side': side,
             'order': undefined,
@@ -491,18 +510,30 @@ export default class ekiden extends Exchange {
                 continue;
             }
             if (side === 'buy') {
-                bidsMap[key] = (bidsMap[key] || 0) + sizeFloat;
+                const prev = this.safeNumber(bidsMap, key, 0);
+                bidsMap[key] = this.sum(prev, sizeFloat);
             }
             else if (side === 'sell') {
-                asksMap[key] = (asksMap[key] || 0) + sizeFloat;
+                const prev = this.safeNumber(asksMap, key, 0);
+                asksMap[key] = this.sum(prev, sizeFloat);
             }
         }
-        const bidsKeys = Object.keys(bidsMap).map((k) => this.parseToNumeric(k));
-        const asksKeys = Object.keys(asksMap).map((k) => this.parseToNumeric(k));
-        // Convert price ints to floats using quote decimals
-        const toFloatPrice = (p) => ((quoteDecimals !== undefined) ? (p / Math.pow(10, quoteDecimals)) : p);
-        const bids = bidsKeys.sort((a, b) => b - a).map((p) => [toFloatPrice(p), bidsMap[p.toString()]]);
-        const asks = asksKeys.sort((a, b) => a - b).map((p) => [toFloatPrice(p), asksMap[p.toString()]]);
+        const bids = [];
+        const asks = [];
+        const bidKeys = Object.keys(bidsMap);
+        for (let i = 0; i < bidKeys.length; i++) {
+            const k = bidKeys[i];
+            const pInt = this.parseToNumeric(k);
+            const pFloat = (quoteDecimals !== undefined) ? (pInt / Math.pow(10, quoteDecimals)) : pInt;
+            bids.push([pFloat, bidsMap[k]]);
+        }
+        const askKeys = Object.keys(asksMap);
+        for (let i = 0; i < askKeys.length; i++) {
+            const k = askKeys[i];
+            const pInt = this.parseToNumeric(k);
+            const pFloat = (quoteDecimals !== undefined) ? (pInt / Math.pow(10, quoteDecimals)) : pInt;
+            asks.push([pFloat, asksMap[k]]);
+        }
         const orderbook = { 'bids': bids, 'asks': asks };
         const result = this.parseOrderBook(orderbook, symbol);
         if (limit !== undefined) {
@@ -513,7 +544,7 @@ export default class ekiden extends Exchange {
     }
     async fetchBalance(params = {}) {
         // Derive balances from user portfolio endpoint; assumes a single quote asset vault (e.g., USDC)
-        this.checkRequiredCredentials(false);
+        this.checkRequiredCredentials();
         const response = await this.request('user/portfolio', ['v1', 'private'], 'GET', params);
         // response: PortfolioResponse { vault_balances: [ { asset_addr, balance } ], summary: { total_margin_used } }
         const vaults = this.safeValue(response, 'vault_balances', []);
@@ -527,7 +558,11 @@ export default class ekiden extends Exchange {
             // find any market where quoteId == assetAddr
             const marketIds = Object.keys(this.markets_by_id || {});
             for (let i = 0; i < marketIds.length; i++) {
-                const m = this.markets_by_id[marketIds[i]];
+                let m = this.markets_by_id[marketIds[i]];
+                // markets_by_id can map an id to an array of market dicts; use the first
+                if (Array.isArray(m) && m.length > 0) {
+                    m = m[0];
+                }
                 const info = m ? (m['info'] || {}) : {};
                 const quoteId = this.safeString(info, 'quote_addr');
                 if (quoteId === assetAddr) {
@@ -544,11 +579,16 @@ export default class ekiden extends Exchange {
                 }
             }
         }
-        const scale = (x) => ((decimals !== undefined) ? (x / Math.pow(10, decimals)) : x);
         const totalRaw = this.safeInteger(vaults[0] || {}, 'balance');
         const usedRaw = this.safeInteger(summary, 'total_margin_used');
-        const total = (totalRaw !== undefined) ? scale(totalRaw) : undefined;
-        const used = (usedRaw !== undefined) ? scale(usedRaw) : 0;
+        let total = undefined;
+        if (totalRaw !== undefined) {
+            total = (decimals !== undefined) ? (totalRaw / Math.pow(10, decimals)) : totalRaw;
+        }
+        let used = 0;
+        if (usedRaw !== undefined) {
+            used = (decimals !== undefined) ? (usedRaw / Math.pow(10, decimals)) : usedRaw;
+        }
         const free = (total !== undefined && used !== undefined) ? (total - used) : undefined;
         const result = { 'info': response };
         result[code] = {
@@ -731,7 +771,13 @@ export default class ekiden extends Exchange {
         if (hasPayload) {
             const commitProvided = this.safeBool(params, 'commit', false);
             request = this.omit(params, ['commit']);
-            const responseProvided = commitProvided ? (await this.v1PrivatePostUserIntentCommit(request)) : (await this.v1PrivatePostUserIntent(request));
+            let responseProvided = undefined;
+            if (commitProvided) {
+                responseProvided = await this.v1PrivatePostUserIntentCommit(request);
+            }
+            else {
+                responseProvided = await this.v1PrivatePostUserIntent(request);
+            }
             return this.safeOrder({ 'id': undefined, 'symbol': market['symbol'], 'info': responseProvided });
         }
         if (!this.privateKey) {
@@ -743,7 +789,13 @@ export default class ekiden extends Exchange {
         const payload = { 'type': 'order_create', 'orders': [order] };
         const nonce = ('nonce' in params) ? this.safeInteger(params, 'nonce') : this.milliseconds();
         request = this.buildSignedIntent(payload, nonce);
-        const responseSigned = commitFlag ? (await this.v1PrivatePostUserIntentCommit(request)) : (await this.v1PrivatePostUserIntent(request));
+        let responseSigned = undefined;
+        if (commitFlag) {
+            responseSigned = await this.v1PrivatePostUserIntentCommit(request);
+        }
+        else {
+            responseSigned = await this.v1PrivatePostUserIntent(request);
+        }
         // If committed, try to resolve the final order from user/orders by seq
         if (commitFlag) {
             const seq = this.safeInteger(responseSigned, 'seq');
@@ -759,6 +811,8 @@ export default class ekiden extends Exchange {
                 }
                 catch (e) {
                     // ignore and fallback below
+                    // eslint-disable-next-line no-unused-vars
+                    const _ = e; // no-op to satisfy transpilers
                 }
             }
         }
@@ -773,7 +827,13 @@ export default class ekiden extends Exchange {
         if (hasPayload) {
             const commitProvided = this.safeBool(params, 'commit', false);
             request = this.omit(params, ['commit']);
-            const responseProvided = commitProvided ? (await this.v1PrivatePostUserIntentCommit(request)) : (await this.v1PrivatePostUserIntent(request));
+            let responseProvided = undefined;
+            if (commitProvided) {
+                responseProvided = await this.v1PrivatePostUserIntentCommit(request);
+            }
+            else {
+                responseProvided = await this.v1PrivatePostUserIntent(request);
+            }
             return this.parseCancelOrderResult(responseProvided, id, market);
         }
         if (!this.privateKey) {
@@ -784,7 +844,13 @@ export default class ekiden extends Exchange {
         const payload = { 'type': 'order_cancel', 'cancels': [{ 'sid': id }] };
         const nonce = ('nonce' in params) ? this.safeInteger(params, 'nonce') : this.milliseconds();
         request = this.buildSignedIntent(payload, nonce);
-        const responseSigned = commitFlag ? (await this.v1PrivatePostUserIntentCommit(request)) : (await this.v1PrivatePostUserIntent(request));
-        return this.parseCancelOrderResult(responseSigned, id, market);
+        let responseSigned2 = undefined;
+        if (commitFlag) {
+            responseSigned2 = await this.v1PrivatePostUserIntentCommit(request);
+        }
+        else {
+            responseSigned2 = await this.v1PrivatePostUserIntent(request);
+        }
+        return this.parseCancelOrderResult(responseSigned2, id, market);
     }
 }

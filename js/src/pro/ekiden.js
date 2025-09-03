@@ -117,7 +117,8 @@ export default class ekiden extends ekidenRest {
             }
         }
         catch (e) {
-            // swallow and retry
+            // eslint-disable-next-line no-unused-vars
+            const _ = e; // no-op to satisfy transpilers
         }
         this.delay(pollMs, this.watchOrdersLoop, client, messageHash, market, params);
     }
