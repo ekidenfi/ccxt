@@ -323,8 +323,8 @@ class ekiden extends ekiden$1["default"] {
             'urls': {
                 'logo': 'https://raw.githubusercontent.com/ekidenfi/ekiden-docs/refs/heads/main/logo/light.svg',
                 'api': {
-                    'public': 'https://api.{hostname}',
-                    'private': 'https://api.{hostname}',
+                    'public': 'https://api.ekiden.fi',
+                    'private': 'https://api.ekiden.fi',
                 },
                 'test': {
                     'public': 'https://api.staging.ekiden.fi',

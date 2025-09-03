@@ -331,8 +331,8 @@ class ekiden extends Exchange {
             'urls' => array(
                 'logo' => 'https://raw.githubusercontent.com/ekidenfi/ekiden-docs/refs/heads/main/logo/light.svg',
                 'api' => array(
-                    'public' => 'https://api.{hostname}',
-                    'private' => 'https://api.{hostname}',
+                    'public' => 'https://api.ekiden.fi',
+                    'private' => 'https://api.ekiden.fi',
                 ),
                 'test' => array(
                     'public' => 'https://api.staging.ekiden.fi',

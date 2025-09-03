@@ -2,8 +2,6 @@ import ccxt from '../../js/ccxt.js';
 
 process.on('unhandledRejection', (e) => { console.error(e); process.exit(1); });
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
 async function main () {
     const ex = new ccxt.pro.ekiden({
         apiKey: "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIweGU1M2UxMTkwNDgyMzdhN2E2NjU1NTFmYmNlNzhhOTE2OGVmMDIwOWE4NzQ2ODZkMGQ4MTJhZTdkZGE5NjQyYzciLCJpYXQiOjE3NTY4NDQxMTYsImV4cCI6MTc1NzQ0ODkxNiwicHVibGljX2tleSI6IjB4NTYzNzBhNDNkZjg3NjJiOTJiMmNkM2VhZmVmYjBlN2UxZTZlODZlZjQyNzRiZTA0Y2MzNzY5NGRlNzIxNjg4OSIsImh0dHBzOi8vaGFzdXJhLmlvL2p3dC9jbGFpbXMiOnsieC1oYXN1cmEtdXNlci1pZCI6IjB4ZTUzZTExOTA0ODIzN2E3YTY2NTU1MWZiY2U3OGE5MTY4ZWYwMjA5YTg3NDY4NmQwZDgxMmFlN2RkYTk2NDJjNyIsIngtaGFzdXJhLXJvbGUiOiJ1c2VyIiwieC1oYXN1cmEtZGVmYXVsdC1yb2xlIjoidXNlciIsIngtaGFzdXJhLWFsbG93ZWQtcm9sZXMiOlsidXNlciJdfX0.TnKdT8or-22iZ2eWl0C_oq7-KHHW5yEOiTqO30N2SmE",
