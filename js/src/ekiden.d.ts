@@ -1,5 +1,5 @@
 import Exchange from './abstract/ekiden.js';
-import type { Market, OHLCV, Order, Int, Ticker, Num, OrderSide, OrderType, Dict, Str } from './base/types.js';
+import type { Market, OHLCV, Order, Int, Ticker, Num, OrderSide, OrderType, Dict, Str, Trade, OrderBook, Balances } from './base/types.js';
 /**
  * @class ekiden
  * @augments Exchange
@@ -27,6 +27,10 @@ export default class ekiden extends Exchange {
         headers: any;
     };
     fetchMarkets(params?: {}): Promise<Market[]>;
+    parseTrade(trade: Dict, market?: Market): Trade;
+    fetchTrades(symbol: string, since?: Int, limit?: Int, params?: {}): Promise<Trade[]>;
+    fetchOrderBook(symbol: string, limit?: Int, params?: {}): Promise<OrderBook>;
+    fetchBalance(params?: {}): Promise<Balances>;
     parseOHLCV(ohlcv: any, market?: Market): OHLCV;
     fetchOHLCV(symbol: string, timeframe?: string, since?: Int, limit?: Int, params?: {}): Promise<OHLCV[]>;
     fetchTicker(symbol: string, params?: {}): Promise<Ticker>;

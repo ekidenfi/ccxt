@@ -3,7 +3,7 @@
 import Exchange from './abstract/ekiden.js';
 import { DECIMAL_PLACES } from './base/functions/number.js';
 import { ArgumentsRequired, OrderNotFound, NotSupported } from './base/errors.js';
-import type { Market, OHLCV, Order, Int, Ticker, Num, OrderSide, OrderType, Dict, Str } from './base/types.js';
+import type { Market, OHLCV, Order, Int, Ticker, Num, OrderSide, OrderType, Dict, Str, Trade, OrderBook, Balances } from './base/types.js';
 import { ed25519 } from './static_dependencies/noble-curves/ed25519.js';
 //  ---------------------------------------------------------------------------
 
@@ -255,18 +255,18 @@ export default class ekiden extends Exchange {
                 'cancelAllOrders': false,
                 'cancelOrder': true,
                 'createOrder': true,
-                'fetchBalance': false,
+                'fetchBalance': true,
                 'fetchClosedOrders': true,
                 'fetchMarkets': true,
                 'fetchMyTrades': false,
                 'fetchOHLCV': true,
                 'fetchOpenOrders': true,
                 'fetchOrder': true,
-                'fetchOrderBook': false,
+                'fetchOrderBook': true,
                 'fetchPositions': false,
                 'fetchTicker': true,
                 'fetchTickers': false,
-                'fetchTrades': false,
+                'fetchTrades': true,
                 'sandbox': true,
             },
             'timeframes': {
@@ -389,6 +389,153 @@ export default class ekiden extends Exchange {
             } as any);
         }
         return result;
+    }
+
+    parseTrade (trade: Dict, market: Market = undefined): Trade {
+        const id = this.safeString (trade, 'sid');
+        const side = this.safeStringLower (trade, 'side');
+        const ts = this.safeInteger (trade, 'timestamp');
+        const timestamp = (ts !== undefined) ? (ts * 1000) : undefined;
+        const marketId = this.safeString (trade, 'market_addr');
+        market = market || this.safeMarket (marketId);
+        const baseDecimals = this.safeInteger (market['info'] || {}, 'base_decimals');
+        const quoteDecimals = this.safeInteger (market['info'] || {}, 'quote_decimals');
+        const sizeInt = this.safeInteger (trade, 'size');
+        const priceInt = this.safeInteger (trade, 'price');
+        let amount = undefined;
+        let price = undefined;
+        if (baseDecimals !== undefined && sizeInt !== undefined) {
+            amount = sizeInt / Math.pow (10, baseDecimals);
+        }
+        if (quoteDecimals !== undefined && priceInt !== undefined) {
+            price = priceInt / Math.pow (10, quoteDecimals);
+        }
+        const cost = (amount !== undefined && price !== undefined) ? (amount * price) : undefined;
+        return this.safeTrade ({
+            'id': id,
+            'timestamp': timestamp,
+            'datetime': (timestamp !== undefined) ? this.iso8601 (timestamp) : undefined,
+            'symbol': market ? market['symbol'] : undefined,
+            'side': side,
+            'order': undefined,
+            'type': undefined,
+            'takerOrMaker': undefined,
+            'price': price,
+            'amount': amount,
+            'cost': cost,
+            'fee': undefined,
+            'info': trade,
+        }, market);
+    }
+
+    async fetchTrades (symbol: string, since: Int = undefined, limit: Int = undefined, params = {}): Promise<Trade[]> {
+        await this.loadMarkets ();
+        const market = this.market (symbol);
+        const request: Dict = {
+            'market_addr': market['id'],
+        };
+        if (limit !== undefined) {
+            request['per_page'] = limit;
+        }
+        const response = await this.v1PublicGetMarketFills (this.extend (request, params));
+        // response: array of FillResponse
+        const trades = this.parseTrades (response, market, since, limit);
+        return trades;
+    }
+
+    async fetchOrderBook (symbol: string, limit: Int = undefined, params = {}): Promise<OrderBook> {
+        await this.loadMarkets ();
+        const market = this.market (symbol);
+        const request: Dict = { 'market_addr': market['id'] };
+        if (limit !== undefined) {
+            request['per_page'] = limit;
+        }
+        const response = await this.v1PublicGetMarketOrders (this.extend (request, params));
+        // response: array of OrderResponse with side/price/size ints
+        const baseDecimals = this.safeInteger (market['info'] || {}, 'base_decimals');
+        const quoteDecimals = this.safeInteger (market['info'] || {}, 'quote_decimals');
+        const bidsMap: Dict = {};
+        const asksMap: Dict = {};
+        for (let i = 0; i < response.length; i++) {
+            const o = response[i];
+            const side = this.safeStringLower (o, 'side');
+            const priceInt = this.safeInteger (o, 'price');
+            const sizeInt = this.safeInteger (o, 'size');
+            if (priceInt === undefined || sizeInt === undefined) {
+                continue;
+            }
+            const key = priceInt.toString ();
+            const sizeFloat = (baseDecimals !== undefined) ? (sizeInt / Math.pow (10, baseDecimals)) : undefined;
+            if (sizeFloat === undefined) {
+                continue;
+            }
+            if (side === 'buy') {
+                bidsMap[key] = (bidsMap[key] || 0) + sizeFloat;
+            } else if (side === 'sell') {
+                asksMap[key] = (asksMap[key] || 0) + sizeFloat;
+            }
+        }
+        const bidsKeys = Object.keys (bidsMap).map ((k) => this.parseToNumeric (k));
+        const asksKeys = Object.keys (asksMap).map ((k) => this.parseToNumeric (k));
+        // Convert price ints to floats using quote decimals
+        const toFloatPrice = (p: number) => ((quoteDecimals !== undefined) ? (p / Math.pow (10, quoteDecimals)) : p);
+        const bids = bidsKeys.sort ((a, b) => b - a).map ((p) => [ toFloatPrice (p), bidsMap[p.toString ()] ]);
+        const asks = asksKeys.sort ((a, b) => a - b).map ((p) => [ toFloatPrice (p), asksMap[p.toString ()] ]);
+        const orderbook = { 'bids': bids, 'asks': asks };
+        const result = this.parseOrderBook (orderbook, symbol);
+        if (limit !== undefined) {
+            result['bids'] = result['bids'].slice (0, limit);
+            result['asks'] = result['asks'].slice (0, limit);
+        }
+        return result;
+    }
+
+    async fetchBalance (params = {}): Promise<Balances> {
+        // Derive balances from user portfolio endpoint; assumes a single quote asset vault (e.g., USDC)
+        this.checkRequiredCredentials (false);
+        const response = await this.request ('user/portfolio', [ 'v1', 'private' ], 'GET', params);
+        // response: PortfolioResponse { vault_balances: [ { asset_addr, balance } ], summary: { total_margin_used } }
+        const vaults = this.safeValue (response, 'vault_balances', []);
+        const summary = this.safeValue (response, 'summary', {});
+        // Try to detect decimals from markets using the first vault asset as quote
+        await this.loadMarkets ();
+        let decimals: number = undefined;
+        let code: string = 'USDC';
+        if (vaults.length > 0) {
+            const assetAddr = this.safeString (vaults[0], 'asset_addr');
+            // find any market where quoteId == assetAddr
+            const marketIds = Object.keys (this.markets_by_id || {});
+            for (let i = 0; i < marketIds.length; i++) {
+                const m = this.markets_by_id[marketIds[i]];
+                const info = m ? (m['info'] || {}) : {};
+                const quoteId = this.safeString (info, 'quote_addr');
+                if (quoteId === assetAddr) {
+                    decimals = this.safeInteger (info, 'quote_decimals');
+                    // Best-effort code detection: try to parse from symbol suffix (e.g., BTC/USDC)
+                    const sym = this.safeString (m, 'symbol');
+                    if (sym) {
+                        const parts = sym.split ('/');
+                        if (parts.length > 1) {
+                            code = parts[1].split (':')[0];
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        const scale = (x: number) => ((decimals !== undefined) ? (x / Math.pow (10, decimals)) : x);
+        const totalRaw = this.safeInteger (vaults[0] || {}, 'balance');
+        const usedRaw = this.safeInteger (summary, 'total_margin_used');
+        const total = (totalRaw !== undefined) ? scale (totalRaw) : undefined;
+        const used = (usedRaw !== undefined) ? scale (usedRaw) : 0;
+        const free = (total !== undefined && used !== undefined) ? (total - used) : undefined;
+        const result: Dict = { 'info': response };
+        result[code] = {
+            'free': free,
+            'used': used,
+            'total': total,
+        };
+        return this.safeBalance (result);
     }
 
     parseOHLCV (ohlcv, market: Market = undefined): OHLCV {

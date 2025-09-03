@@ -36,6 +36,37 @@ async function main () {
         console.log('fetchOHLCV failed:', e.message);
     }
 
+    // fetchOrderBook
+    try {
+        const ob = await ex.fetchOrderBook(symbol, 10);
+        console.log('fetchOrderBook top:', { bid: ob.bids[0], ask: ob.asks[0] });
+    } catch (e) {
+        console.log('fetchOrderBook failed:', e.message);
+    }
+
+    // fetchTrades
+    try {
+        const trades = await ex.fetchTrades(symbol, undefined, 5);
+        console.log('fetchTrades length:', trades.length /*, 'first:', trades[0] */);
+    } catch (e) {
+        console.log('fetchTrades failed:', e.message);
+    }
+
+    // fetchBalance
+    try {
+        const balances = await ex.fetchBalance();
+        const codes = Object.keys(balances).filter((k) => !['info', 'timestamp', 'datetime'].includes(k));
+        if (codes.length) {
+            const code = codes[0];
+            const { free, used, total } = balances[code] || {};
+            console.log('fetchBalance:', code, { free, used, total });
+        } else {
+            console.log('fetchBalance: no balances');
+        }
+    } catch (e) {
+        console.log('fetchBalance failed (requires auth):', e.message);
+    }
+
     // watchOHLCV (Pro)
     try {
         if (ex.has['watchOHLCV']) {
