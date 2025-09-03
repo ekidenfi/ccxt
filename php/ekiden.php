@@ -322,11 +322,16 @@ class ekiden extends Exchange {
                 '4h' => '4h',
                 '1d' => '1d',
             ),
+            'hostname' => 'ekiden.fi',
             'urls' => array(
-                'logo' => 'https://raw.githubusercontent.com/ekidenfi/ekiden-docs/refs/heads/main/logo/dark.svg',
+                'logo' => 'https://raw.githubusercontent.com/ekidenfi/ekiden-docs/refs/heads/main/logo/light.svg',
                 'api' => array(
-                    'public' => 'https://api.ekiden.fi',
-                    'private' => 'https://api.ekiden.fi',
+                    'public' => 'https://api.{hostname}',
+                    'private' => 'https://api.{hostname}',
+                ),
+                'test' => array(
+                    'public' => 'https://api.staging.ekiden.fi',
+                    'private' => 'https://api.staging.ekiden.fi',
                 ),
                 'www' => 'https://ekiden.fi',
                 'doc' => array(
@@ -335,8 +340,8 @@ class ekiden extends Exchange {
             ),
             'precisionMode' => DECIMAL_PLACES,
             'requiredCredentials' => array(
-                'apiKey' => false,
-                'secret' => false,
+                'apiKey' => true,
+                'secret' => true,
             ),
             'api' => array(
                 'v1' => array(

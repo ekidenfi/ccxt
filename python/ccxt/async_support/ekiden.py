@@ -293,11 +293,16 @@ class ekiden(Exchange, ImplicitAPI):
                 '4h': '4h',
                 '1d': '1d',
             },
+            'hostname': 'ekiden.fi',
             'urls': {
-                'logo': 'https://raw.githubusercontent.com/ekidenfi/ekiden-docs/refs/heads/main/logo/dark.svg',
+                'logo': 'https://raw.githubusercontent.com/ekidenfi/ekiden-docs/refs/heads/main/logo/light.svg',
                 'api': {
-                    'public': 'https://api.ekiden.fi',
-                    'private': 'https://api.ekiden.fi',
+                    'public': 'https://api.{hostname}',
+                    'private': 'https://api.{hostname}',
+                },
+                'test': {
+                    'public': 'https://api.staging.ekiden.fi',
+                    'private': 'https://api.staging.ekiden.fi',
                 },
                 'www': 'https://ekiden.fi',
                 'doc': [
@@ -306,8 +311,8 @@ class ekiden(Exchange, ImplicitAPI):
             },
             'precisionMode': DECIMAL_PLACES,
             'requiredCredentials': {
-                'apiKey': False,
-                'secret': False,
+                'apiKey': True,
+                'secret': True,
             },
             'api': {
                 'v1': {
