@@ -24,6 +24,11 @@ class ekiden extends \ccxt\async\ekiden {
                         'public' => 'wss://api.ekiden.fi/ws',
                     ),
                 ),
+                'test' => array(
+                    'ws' => array(
+                        'public' => 'wss://api.staging.ekiden.fi/ws',
+                    ),
+                ),
             ),
             'streaming' => array(
                 'keepAlive' => 20000,

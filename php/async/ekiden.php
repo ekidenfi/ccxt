@@ -206,7 +206,7 @@ class ekiden extends Exchange {
             }
         }
         $ts = $this->safe_integer($response, 'timestamp');
-        $timestamp = ($ts !== null) ? ($ts * 1000) : null;
+        $timestamp = ($ts !== null) ? $this->parse_to_int($ts) : null;
         $datetime = $this->iso8601($timestamp);
         $symbolOut = $market ? $market['symbol'] : null;
         return $this->safe_order(array(
@@ -253,7 +253,7 @@ class ekiden extends Exchange {
             $id = $this->safe_string($response, 'sid');
         }
         $ts = $this->safe_integer($response, 'timestamp');
-        $timestamp = ($ts !== null) ? ($ts * 1000) : null;
+        $timestamp = ($ts !== null) ? $this->parse_to_int($ts) : null;
         $datetime = $this->iso8601($timestamp);
         $symbolOut = $market ? $market['symbol'] : null;
         return $this->safe_order(array(
@@ -297,10 +297,10 @@ class ekiden extends Exchange {
             'dex' => true,
             'has' => array(
                 'CORS' => null,
-                'spot' => false,
+                'spot' => true,
                 'margin' => false,
                 'swap' => true,
-                'future' => false,
+                'future' => true,
                 'option' => false,
                 'cancelAllOrders' => false,
                 'cancelOrder' => true,
@@ -331,8 +331,8 @@ class ekiden extends Exchange {
             'urls' => array(
                 'logo' => 'https://raw.githubusercontent.com/ekidenfi/ekiden-docs/refs/heads/main/logo/light.svg',
                 'api' => array(
-                    'public' => 'https://api.ekiden.fi',
-                    'private' => 'https://api.ekiden.fi',
+                    'public' => 'https://api.staging.ekiden.fi',
+                    'private' => 'https://api.staging.ekiden.fi',
                 ),
                 'test' => array(
                     'public' => 'https://api.staging.ekiden.fi',
@@ -370,10 +370,29 @@ class ekiden extends Exchange {
                     ),
                 ),
             ),
+            'fees' => array(
+                'trading' => array(
+                    'tierBased' => false,
+                    'percentage' => true,
+                    'taker' => $this->parse_number('0.001'),
+                    'maker' => $this->parse_number('0.001'),
+                ),
+            ),
             'options' => array(
-                'sandboxMode' => false,
+                'sandboxMode' => true,
             ),
             'commonCurrencies' => array(
+            ),
+            'spot' => array(
+                'extends' => 'default',
+            ),
+            'future' => array(
+                'linear' => array(
+                    'extends' => 'forPerps',
+                ),
+                'inverse' => array(
+                    'extends' => 'forPerps',
+                ),
             ),
         ));
     }
@@ -453,7 +472,7 @@ class ekiden extends Exchange {
         $id = $this->safe_string($trade, 'sid');
         $side = $this->safe_string_lower($trade, 'side');
         $ts = $this->safe_integer($trade, 'timestamp');
-        $timestamp = ($ts !== null) ? ($ts * 1000) : null;
+        $timestamp = ($ts !== null) ? $this->parse_to_int($ts) : null;
         $marketId = $this->safe_string($trade, 'market_addr');
         $market = $market || $this->safe_market($marketId);
         $baseDecimals = $this->safe_integer($market['info'] || array(), 'base_decimals');
@@ -660,12 +679,17 @@ class ekiden extends Exchange {
             Async\await($this->load_markets());
             $market = $this->market($this->normalize_symbol($symbol));
             $response = Async\await($this->v1PublicGetMarketCandlesStatsMarketAddr ($this->extend(array( 'market_addr' => $market['id'] ), $params)));
-            // MarketStatsResponse => current_price, price_24h_ago, price_change_24h, high_24h, low_24h, volume_24h, trades_24h
+            // MarketStatsResponse => current_price, price_24h_ago, price_change_24h, high_24h, low_24h, volume_24h (quote volume), trades_24h
             $last = $this->safe_number($response, 'current_price');
             $high = $this->safe_number($response, 'high_24h');
             $low = $this->safe_number($response, 'low_24h');
             $percentage = $this->safe_number($response, 'price_change_24h');
-            $baseVolume = $this->safe_number($response, 'volume_24h');
+            $rawQuoteVolume = $this->safe_number($response, 'volume_24h');
+            $quoteVolume = (!$rawQuoteVolume) ? 0 : $rawQuoteVolume;
+            $baseVolume = 0;
+            if (($quoteVolume > 0) && ($last !== null) && ($last > 0)) {
+                $baseVolume = $quoteVolume / $last;
+            }
             return $this->safe_ticker(array(
                 'symbol' => $market['symbol'],
                 'timestamp' => null,
@@ -685,7 +709,7 @@ class ekiden extends Exchange {
                 'percentage' => $percentage,
                 'average' => null,
                 'baseVolume' => $baseVolume,
-                'quoteVolume' => null,
+                'quoteVolume' => $quoteVolume,
                 'info' => $response,
             ), $market);
         }) ();
@@ -697,7 +721,7 @@ class ekiden extends Exchange {
         $side = $this->safe_string_lower($order, 'side');
         $type = $this->safe_string_lower($order, 'type');
         $ts = $this->safe_integer($order, 'timestamp');
-        $timestamp = ($ts !== null) ? ($ts * 1000) : null;
+        $timestamp = ($ts !== null) ? $this->parse_to_int($ts) : null;
         $marketId = $this->safe_string($order, 'market_addr');
         $market = $market || $this->safe_market($marketId);
         $baseDecimals = $this->safe_integer($market['info'] || array(), 'base_decimals');

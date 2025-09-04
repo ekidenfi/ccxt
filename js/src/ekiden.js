@@ -201,7 +201,7 @@ export default class ekiden extends Exchange {
             }
         }
         const ts = this.safeInteger(response, 'timestamp');
-        const timestamp = (ts !== undefined) ? (ts * 1000) : undefined;
+        const timestamp = (ts !== undefined) ? this.parseToInt(ts) : undefined;
         const datetime = this.iso8601(timestamp);
         const symbolOut = market ? market['symbol'] : undefined;
         return this.safeOrder({
@@ -247,7 +247,7 @@ export default class ekiden extends Exchange {
             id = this.safeString(response, 'sid');
         }
         const ts = this.safeInteger(response, 'timestamp');
-        const timestamp = (ts !== undefined) ? (ts * 1000) : undefined;
+        const timestamp = (ts !== undefined) ? this.parseToInt(ts) : undefined;
         const datetime = this.iso8601(timestamp);
         const symbolOut = market ? market['symbol'] : undefined;
         return this.safeOrder({
@@ -290,10 +290,10 @@ export default class ekiden extends Exchange {
             'dex': true,
             'has': {
                 'CORS': undefined,
-                'spot': false,
+                'spot': true,
                 'margin': false,
                 'swap': true,
-                'future': false,
+                'future': true,
                 'option': false,
                 'cancelAllOrders': false,
                 'cancelOrder': true,
@@ -324,8 +324,8 @@ export default class ekiden extends Exchange {
             'urls': {
                 'logo': 'https://raw.githubusercontent.com/ekidenfi/ekiden-docs/refs/heads/main/logo/light.svg',
                 'api': {
-                    'public': 'https://api.ekiden.fi',
-                    'private': 'https://api.ekiden.fi',
+                    'public': 'https://api.staging.ekiden.fi',
+                    'private': 'https://api.staging.ekiden.fi',
                 },
                 'test': {
                     'public': 'https://api.staging.ekiden.fi',
@@ -363,10 +363,29 @@ export default class ekiden extends Exchange {
                     },
                 },
             },
+            'fees': {
+                'trading': {
+                    'tierBased': false,
+                    'percentage': true,
+                    'taker': this.parseNumber('0.001'),
+                    'maker': this.parseNumber('0.001'),
+                },
+            },
             'options': {
-                'sandboxMode': false,
+                'sandboxMode': true,
             },
             'commonCurrencies': {},
+            'spot': {
+                'extends': 'default',
+            },
+            'future': {
+                'linear': {
+                    'extends': 'forPerps',
+                },
+                'inverse': {
+                    'extends': 'forPerps',
+                },
+            },
         });
     }
     sign(path, api = [], method = 'GET', params = {}, headers = undefined, body = undefined) {
@@ -441,7 +460,7 @@ export default class ekiden extends Exchange {
         const id = this.safeString(trade, 'sid');
         const side = this.safeStringLower(trade, 'side');
         const ts = this.safeInteger(trade, 'timestamp');
-        const timestamp = (ts !== undefined) ? (ts * 1000) : undefined;
+        const timestamp = (ts !== undefined) ? this.parseToInt(ts) : undefined;
         const marketId = this.safeString(trade, 'market_addr');
         market = market || this.safeMarket(marketId);
         const baseDecimals = this.safeInteger(market['info'] || {}, 'base_decimals');
@@ -634,12 +653,17 @@ export default class ekiden extends Exchange {
         await this.loadMarkets();
         const market = this.market(this.normalizeSymbol(symbol));
         const response = await this.v1PublicGetMarketCandlesStatsMarketAddr(this.extend({ 'market_addr': market['id'] }, params));
-        // MarketStatsResponse: current_price, price_24h_ago, price_change_24h, high_24h, low_24h, volume_24h, trades_24h
+        // MarketStatsResponse: current_price, price_24h_ago, price_change_24h, high_24h, low_24h, volume_24h (quote volume), trades_24h
         const last = this.safeNumber(response, 'current_price');
         const high = this.safeNumber(response, 'high_24h');
         const low = this.safeNumber(response, 'low_24h');
         const percentage = this.safeNumber(response, 'price_change_24h');
-        const baseVolume = this.safeNumber(response, 'volume_24h');
+        const rawQuoteVolume = this.safeNumber(response, 'volume_24h');
+        const quoteVolume = ((rawQuoteVolume === undefined) || !isFinite(rawQuoteVolume)) ? 0 : rawQuoteVolume;
+        let baseVolume = 0;
+        if ((quoteVolume > 0) && (last !== undefined) && (last > 0)) {
+            baseVolume = quoteVolume / last;
+        }
         return this.safeTicker({
             'symbol': market['symbol'],
             'timestamp': undefined,
@@ -659,7 +683,7 @@ export default class ekiden extends Exchange {
             'percentage': percentage,
             'average': undefined,
             'baseVolume': baseVolume,
-            'quoteVolume': undefined,
+            'quoteVolume': quoteVolume,
             'info': response,
         }, market);
     }
@@ -669,7 +693,7 @@ export default class ekiden extends Exchange {
         const side = this.safeStringLower(order, 'side');
         const type = this.safeStringLower(order, 'type');
         const ts = this.safeInteger(order, 'timestamp');
-        const timestamp = (ts !== undefined) ? (ts * 1000) : undefined;
+        const timestamp = (ts !== undefined) ? this.parseToInt(ts) : undefined;
         const marketId = this.safeString(order, 'market_addr');
         market = market || this.safeMarket(marketId);
         const baseDecimals = this.safeInteger(market['info'] || {}, 'base_decimals');

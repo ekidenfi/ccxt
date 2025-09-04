@@ -21,6 +21,11 @@ class ekiden extends ekiden$1["default"] {
                         'public': 'wss://api.ekiden.fi/ws',
                     },
                 },
+                'test': {
+                    'ws': {
+                        'public': 'wss://api.staging.ekiden.fi/ws',
+                    },
+                },
             },
             'streaming': {
                 'keepAlive': 20000,

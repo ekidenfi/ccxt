@@ -22,6 +22,11 @@ export default class ekiden extends ekidenRest {
                         'public': 'wss://api.ekiden.fi/ws',
                     },
                 },
+                'test': {
+                    'ws': {
+                        'public': 'wss://api.staging.ekiden.fi/ws',
+                    },
+                },
             },
             'streaming': {
                 'keepAlive': 20000,

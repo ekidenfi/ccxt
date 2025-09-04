@@ -177,7 +177,7 @@ class ekiden(Exchange, ImplicitAPI):
                 if sid is not None:
                     id = sid
         ts = self.safe_integer(response, 'timestamp')
-        timestamp = (ts * 1000) if (ts is not None) else None
+        timestamp = self.parse_to_int(ts) if (ts is not None) else None
         datetime = self.iso8601(timestamp)
         symbolOut = market['symbol'] if market else None
         return self.safe_order({
@@ -220,7 +220,7 @@ class ekiden(Exchange, ImplicitAPI):
         if id is None:
             id = self.safe_string(response, 'sid')
         ts = self.safe_integer(response, 'timestamp')
-        timestamp = (ts * 1000) if (ts is not None) else None
+        timestamp = self.parse_to_int(ts) if (ts is not None) else None
         datetime = self.iso8601(timestamp)
         symbolOut = market['symbol'] if market else None
         return self.safe_order({
@@ -263,10 +263,10 @@ class ekiden(Exchange, ImplicitAPI):
             'dex': True,
             'has': {
                 'CORS': None,
-                'spot': False,
+                'spot': True,
                 'margin': False,
                 'swap': True,
-                'future': False,
+                'future': True,
                 'option': False,
                 'cancelAllOrders': False,
                 'cancelOrder': True,
@@ -297,8 +297,8 @@ class ekiden(Exchange, ImplicitAPI):
             'urls': {
                 'logo': 'https://raw.githubusercontent.com/ekidenfi/ekiden-docs/refs/heads/main/logo/light.svg',
                 'api': {
-                    'public': 'https://api.ekiden.fi',
-                    'private': 'https://api.ekiden.fi',
+                    'public': 'https://api.staging.ekiden.fi',
+                    'private': 'https://api.staging.ekiden.fi',
                 },
                 'test': {
                     'public': 'https://api.staging.ekiden.fi',
@@ -336,10 +336,29 @@ class ekiden(Exchange, ImplicitAPI):
                     },
                 },
             },
+            'fees': {
+                'trading': {
+                    'tierBased': False,
+                    'percentage': True,
+                    'taker': self.parse_number('0.001'),
+                    'maker': self.parse_number('0.001'),
+                },
+            },
             'options': {
-                'sandboxMode': False,
+                'sandboxMode': True,
             },
             'commonCurrencies': {
+            },
+            'spot': {
+                'extends': 'default',
+            },
+            'future': {
+                'linear': {
+                    'extends': 'forPerps',
+                },
+                'inverse': {
+                    'extends': 'forPerps',
+                },
             },
         })
 
@@ -409,7 +428,7 @@ class ekiden(Exchange, ImplicitAPI):
         id = self.safe_string(trade, 'sid')
         side = self.safe_string_lower(trade, 'side')
         ts = self.safe_integer(trade, 'timestamp')
-        timestamp = (ts * 1000) if (ts is not None) else None
+        timestamp = self.parse_to_int(ts) if (ts is not None) else None
         marketId = self.safe_string(trade, 'market_addr')
         market = market or self.safe_market(marketId)
         baseDecimals = self.safe_integer(market['info'] or {}, 'base_decimals')
@@ -580,12 +599,16 @@ class ekiden(Exchange, ImplicitAPI):
         self.load_markets()
         market = self.market(self.normalize_symbol(symbol))
         response = self.v1PublicGetMarketCandlesStatsMarketAddr(self.extend({'market_addr': market['id']}, params))
-        # MarketStatsResponse: current_price, price_24h_ago, price_change_24h, high_24h, low_24h, volume_24h, trades_24h
+        # MarketStatsResponse: current_price, price_24h_ago, price_change_24h, high_24h, low_24h, volume_24h(quote volume), trades_24h
         last = self.safe_number(response, 'current_price')
         high = self.safe_number(response, 'high_24h')
         low = self.safe_number(response, 'low_24h')
         percentage = self.safe_number(response, 'price_change_24h')
-        baseVolume = self.safe_number(response, 'volume_24h')
+        rawQuoteVolume = self.safe_number(response, 'volume_24h')
+        quoteVolume = 0 if (not rawQuoteVolume) else rawQuoteVolume
+        baseVolume = 0
+        if (quoteVolume > 0) and (last is not None) and (last > 0):
+            baseVolume = quoteVolume / last
         return self.safe_ticker({
             'symbol': market['symbol'],
             'timestamp': None,
@@ -605,7 +628,7 @@ class ekiden(Exchange, ImplicitAPI):
             'percentage': percentage,
             'average': None,
             'baseVolume': baseVolume,
-            'quoteVolume': None,
+            'quoteVolume': quoteVolume,
             'info': response,
         }, market)
 
@@ -615,7 +638,7 @@ class ekiden(Exchange, ImplicitAPI):
         side = self.safe_string_lower(order, 'side')
         type = self.safe_string_lower(order, 'type')
         ts = self.safe_integer(order, 'timestamp')
-        timestamp = (ts * 1000) if (ts is not None) else None
+        timestamp = self.parse_to_int(ts) if (ts is not None) else None
         marketId = self.safe_string(order, 'market_addr')
         market = market or self.safe_market(marketId)
         baseDecimals = self.safe_integer(market['info'] or {}, 'base_decimals')
