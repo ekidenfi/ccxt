@@ -6,8 +6,8 @@ import ccxt
 
 def main():
     ex = ccxt.ekiden({
-        'apiKey': "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIweGU1M2UxMTkwNDgyMzdhN2E2NjU1NTFmYmNlNzhhOTE2OGVmMDIwOWE4NzQ2ODZkMGQ4MTJhZTdkZGE5NjQyYzciLCJpYXQiOjE3NTY4NDQxMTYsImV4cCI6MTc1NzQ0ODkxNiwicHVibGljX2tleSI6IjB4NTYzNzBhNDNkZjg3NjJiOTJiMmNkM2VhZmVmYjBlN2UxZTZlODZlZjQyNzRiZTA0Y2MzNzY5NGRlNzIxNjg4OSIsImh0dHBzOi8vaGFzdXJhLmlvL2p3dC9jbGFpbXMiOnsieC1oYXN1cmEtdXNlci1pZCI6IjB4ZTUzZTExOTA0ODIzN2E3YTY2NTU1MWZiY2U3OGE5MTY4ZWYwMjA5YTg3NDY4NmQwZDgxMmFlN2RkYTk2NDJjNyIsIngtaGFzdXJhLXJvbGUiOiJ1c2VyIiwieC1oYXN1cmEtZGVmYXVsdC1yb2xlIjoidXNlciIsIngtaGFzdXJhLWFsbG93ZWQtcm9sZXMiOlsidXNlciJdfX0.TnKdT8or-22iZ2eWl0C_oq7-KHHW5yEOiTqO30N2SmE",
-        'secret': "0xf575b9f4b6e3411563b6d9900289fbf2c1f1acf6a908f8ba9fddf2f06d06145a"
+        'apiKey': "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIweGIwYWYyMjI3Zjc0YWNiNzBmNDI0NzViMzVhMjMxMjcyNGY1NjExY2MzZmI0YWQxYzhkNmYzMWQxZDBhOGIyMDciLCJpYXQiOjE3NTY4OTU3ODAsImV4cCI6MTc1NzUwMDU4MCwicHVibGljX2tleSI6IjB4MDQ4NTY0MWI4N2ZiZGEyNjMyN2Q4MGYwMjlmNzQwNTgxODY2NjU0MzEzZWVlYzljNWJiOGYyOWRmY2JiNTljYyIsImh0dHBzOi8vaGFzdXJhLmlvL2p3dC9jbGFpbXMiOnsieC1oYXN1cmEtdXNlci1pZCI6IjB4YjBhZjIyMjdmNzRhY2I3MGY0MjQ3NWIzNWEyMzEyNzI0ZjU2MTFjYzNmYjRhZDFjOGQ2ZjMxZDFkMGE4YjIwNyIsIngtaGFzdXJhLXJvbGUiOiJ1c2VyIiwieC1oYXN1cmEtZGVmYXVsdC1yb2xlIjoidXNlciIsIngtaGFzdXJhLWFsbG93ZWQtcm9sZXMiOlsidXNlciJdfX0.jUx1nQH_YzzgDOOITZxvFmu0ayQuBE4qDus40zX99IE",
+        'secret': "0x1f6bdaeb6cd4e89f43eeddeaae7525ec5797d7f304b00005bd005ec7e4c49fc9"
     })
 
     print('Loading markets...')
@@ -16,15 +16,46 @@ def main():
     if not symbols:
         print('No markets available')
         return
-    symbol = symbols[0]
+    # Prefer HYPE/USDC if available for parity with OctoBot error
+    preferred = 'HYPE/USDC'
+    symbol = preferred if preferred in symbols else symbols[0]
     print('Using symbol:', symbol)
 
-    # fetchTicker
+    # fetchTicker (under the hood calls v1PublicGetMarketCandlesStatsMarketAddr)
     try:
         ticker = ex.fetch_ticker(symbol)
-        print('fetchTicker:', {'last': ticker.get('last'), 'high': ticker.get('high'), 'low': ticker.get('low')})
+        print('fetchTicker:', {
+            'last': ticker.get('last'),
+            'high': ticker.get('high'),
+            'low': ticker.get('low'),
+            'baseVolume': ticker.get('baseVolume'),
+            'quoteVolume': ticker.get('quoteVolume'),
+        })
     except Exception as e:
         print('fetchTicker failed:', str(e))
+
+    # Raw stats endpoint called by fetch_ticker
+    try:
+        market = ex.market(symbol)
+        raw_stats = ex.v1PublicGetMarketCandlesStatsMarketAddr({'market_addr': market['id']})
+        print('raw stats:', raw_stats)
+    except Exception as e:
+        print('raw stats failed:', str(e))
+
+    # Compute 24h volume from 1m candles (same logic as ccxt fallback)
+    try:
+        since = ex.milliseconds() - 24 * 60 * 60 * 1000
+        ohlcv = ex.fetch_ohlcv(symbol, '1m', since, 1440)
+        base_sum = 0
+        quote_sum = 0
+        for c in ohlcv:
+            ts, o, h, l, c_close, v = c
+            if v and c_close:
+                base_sum += v
+                quote_sum += v * c_close
+        print('computed 24h from candles:', {'baseVolume': base_sum, 'quoteVolume': quote_sum, 'candles': len(ohlcv)})
+    except Exception as e:
+        print('compute from candles failed:', str(e))
 
     # fetchOHLCV
     try:

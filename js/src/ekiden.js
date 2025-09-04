@@ -7,7 +7,7 @@
 //  ---------------------------------------------------------------------------
 import Exchange from './abstract/ekiden.js';
 import { DECIMAL_PLACES } from './base/functions/number.js';
-import { ArgumentsRequired, OrderNotFound, NotSupported } from './base/errors.js';
+import { ArgumentsRequired, OrderNotFound, NotSupported, InvalidOrder } from './base/errors.js';
 import { ed25519 } from './static_dependencies/noble-curves/ed25519.js';
 import { eddsa } from './base/functions/crypto.js';
 //  ---------------------------------------------------------------------------
@@ -41,6 +41,9 @@ export default class ekiden extends Exchange {
         return value;
     }
     normalizeSymbol(symbol) {
+        // if (symbol.includes (':')) {
+        //     return symbol;
+        // }
         let s = symbol.toUpperCase();
         if (s.indexOf('/') >= 0) {
             const parts = s.split('/');
@@ -75,24 +78,14 @@ export default class ekiden extends Exchange {
         }
         return s;
     }
-    // --- Intent signing helpers (mirrors ts-sdk buildOrderPayload) ---
     intentSeedHex() {
         // Same SEED used in ts-sdk composeHexPayload
         return 'e2ac4e5688d964270ad876d760c2ebb2d54fb26d93512c790049b6583730d06f';
     }
     serializeStringHex(value) {
         const bin = this.encode(value);
-        // Build ULEB128 length manually using numberToLE for cross-language compatibility
         const length = this.binaryLength(bin);
-        let v = length;
-        let ulebHex = '';
-        while (v >= 0x80) {
-            const low7 = v % 128;
-            const byteVal = low7 + 0x80;
-            ulebHex += this.binaryToBase16(this.numberToLE(byteVal, 1));
-            v = Math.floor(v / 0x80);
-        }
-        ulebHex += this.binaryToBase16(this.numberToLE(v, 1));
+        const ulebHex = this.encodeUleb128Length(length);
         const dataHex = this.binaryToBase16(bin);
         return ulebHex + dataHex;
     }
@@ -107,6 +100,116 @@ export default class ekiden extends Exchange {
         }
         uleb += this.binaryToBase16(this.numberToLE(v, 1));
         return uleb;
+    }
+    fromDecimals(valueInt, decimals) {
+        if (valueInt === undefined) {
+            return undefined;
+        }
+        if (decimals === undefined) {
+            return valueInt;
+        }
+        return valueInt / Math.pow(10, decimals);
+    }
+    applyPriceMultiplier(price) {
+        const multiplier = this.safeNumber(this.options, 'priceMultiplier', 1);
+        if (price === undefined) {
+            return price;
+        }
+        if ((multiplier !== undefined) && (multiplier !== 1)) {
+            return price * multiplier;
+        }
+        return price;
+    }
+    parseTickerStats(response, market) {
+        let last = this.safeNumber(response, 'current_price');
+        let high = this.safeNumber(response, 'high_24h');
+        let low = this.safeNumber(response, 'low_24h');
+        const percentage = this.safeNumber(response, 'price_change_24h');
+        const rawQuoteVolume = this.safeNumber(response, 'volume_24h');
+        let quoteVolume = 0;
+        if ((rawQuoteVolume !== undefined) && (rawQuoteVolume > 0)) {
+            quoteVolume = rawQuoteVolume;
+        }
+        let baseVolume = 0;
+        if ((quoteVolume > 0) && (last !== undefined) && (last > 0)) {
+            baseVolume = quoteVolume / last;
+        }
+        const infoMarket = market['info'] || {};
+        const quoteDecimals = this.safeInteger(infoMarket, 'quote_decimals');
+        const markInt = this.safeInteger(infoMarket, 'mark_price');
+        const oracleInt = this.safeInteger(infoMarket, 'oracle_price');
+        let markPrice = this.fromDecimals(markInt, quoteDecimals);
+        let indexPrice = this.fromDecimals(oracleInt, quoteDecimals);
+        last = this.applyPriceMultiplier(last);
+        high = this.applyPriceMultiplier(high);
+        low = this.applyPriceMultiplier(low);
+        markPrice = this.applyPriceMultiplier(markPrice);
+        indexPrice = this.applyPriceMultiplier(indexPrice);
+        const now = this.milliseconds();
+        return this.safeTicker({
+            'symbol': market['symbol'],
+            'timestamp': now,
+            'datetime': this.iso8601(now),
+            'high': high,
+            'low': low,
+            'bid': undefined,
+            'bidVolume': undefined,
+            'ask': undefined,
+            'askVolume': undefined,
+            'vwap': undefined,
+            'open': this.safeNumber(response, 'price_24h_ago'),
+            'close': last,
+            'last': last,
+            'previousClose': undefined,
+            'change': undefined,
+            'percentage': percentage,
+            'average': undefined,
+            'baseVolume': baseVolume,
+            'quoteVolume': quoteVolume,
+            'markPrice': markPrice,
+            'indexPrice': indexPrice,
+            'info': response,
+        }, market);
+    }
+    async compute24hVolumesFromCandles(market) {
+        try {
+            const since = this.milliseconds() - 24 * 60 * 60 * 1000;
+            const candles = await this.fetchOHLCV(market['symbol'], '1m', since, 1440);
+            let baseSum = 0;
+            let quoteSum = 0;
+            const infoMarket = market['info'] || {};
+            const baseDecimals = this.safeInteger(infoMarket, 'base_decimals');
+            for (let i = 0; i < candles.length; i++) {
+                const volRaw = candles[i][5];
+                const close = candles[i][4];
+                if (volRaw !== undefined) {
+                    let volBase = volRaw;
+                    if (baseDecimals !== undefined) {
+                        volBase = volRaw / Math.pow(10, baseDecimals);
+                    }
+                    if ((volBase !== undefined) && (volBase > 0)) {
+                        baseSum += volBase;
+                        if ((close !== undefined) && (close > 0)) {
+                            quoteSum += volBase * close;
+                        }
+                    }
+                }
+            }
+            const result = {};
+            if (baseSum > 0) {
+                result['baseVolume'] = baseSum;
+            }
+            if (quoteSum > 0) {
+                result['quoteVolume'] = quoteSum;
+            }
+            return result;
+        }
+        catch (e) {
+            // ignore fallback errors
+            // eslint-disable-next-line no-unused-vars
+            const _ = e;
+            return {};
+        }
     }
     serializeActionPayloadHex(payload) {
         // Mirrors ts-sdk/src/utils/buildOrderPayload.ts
@@ -201,7 +304,7 @@ export default class ekiden extends Exchange {
             }
         }
         const ts = this.safeInteger(response, 'timestamp');
-        const timestamp = (ts !== undefined) ? this.parseToInt(ts) : undefined;
+        const timestamp = (ts !== undefined) ? this.parseToInt(ts * 1000) : undefined;
         const datetime = this.iso8601(timestamp);
         const symbolOut = market ? market['symbol'] : undefined;
         return this.safeOrder({
@@ -247,7 +350,7 @@ export default class ekiden extends Exchange {
             id = this.safeString(response, 'sid');
         }
         const ts = this.safeInteger(response, 'timestamp');
-        const timestamp = (ts !== undefined) ? this.parseToInt(ts) : undefined;
+        const timestamp = (ts !== undefined) ? this.parseToInt(ts * 1000) : undefined;
         const datetime = this.iso8601(timestamp);
         const symbolOut = market ? market['symbol'] : undefined;
         return this.safeOrder({
@@ -290,10 +393,10 @@ export default class ekiden extends Exchange {
             'dex': true,
             'has': {
                 'CORS': undefined,
-                'spot': true,
+                'spot': false,
                 'margin': false,
                 'swap': true,
-                'future': true,
+                'future': false,
                 'option': false,
                 'cancelAllOrders': false,
                 'cancelOrder': true,
@@ -306,11 +409,12 @@ export default class ekiden extends Exchange {
                 'fetchOpenOrders': true,
                 'fetchOrder': true,
                 'fetchOrderBook': true,
-                'fetchPositions': false,
+                'fetchPositions': true,
                 'fetchTicker': true,
-                'fetchTickers': false,
+                'fetchTickers': true,
                 'fetchTrades': true,
                 'sandbox': true,
+                'setLeverage': true,
             },
             'timeframes': {
                 '1m': '1m',
@@ -355,6 +459,8 @@ export default class ekiden extends Exchange {
                     'private': {
                         'get': {
                             'user/orders': 1,
+                            'user/portfolio': 1,
+                            'user/positions': 1,
                         },
                         'post': {
                             'user/intent': 1,
@@ -372,20 +478,12 @@ export default class ekiden extends Exchange {
                 },
             },
             'options': {
+                'defaultType': 'swap',
                 'sandboxMode': true,
+                'priceMultiplier': 1,
+                'createMarketBuyOrderRequiresPrice': true,
             },
             'commonCurrencies': {},
-            'spot': {
-                'extends': 'default',
-            },
-            'future': {
-                'linear': {
-                    'extends': 'forPerps',
-                },
-                'inverse': {
-                    'extends': 'forPerps',
-                },
-            },
         });
     }
     sign(path, api = [], method = 'GET', params = {}, headers = undefined, body = undefined) {
@@ -419,35 +517,50 @@ export default class ekiden extends Exchange {
             const market = response[i];
             const id = this.safeString(market, 'addr');
             const rawSymbol = this.safeString(market, 'symbol');
-            const symbol = (rawSymbol !== undefined) ? this.normalizeSymbol(rawSymbol) : undefined;
+            const normalized = (rawSymbol !== undefined) ? this.normalizeSymbol(rawSymbol) : undefined;
             const baseId = this.safeString(market, 'base_addr');
             const quoteId = this.safeString(market, 'quote_addr');
+            // derive human-readable currency codes from normalized symbol
+            let baseCode = undefined;
+            let quoteCode = undefined;
+            if (normalized) {
+                const parts = normalized.split('/');
+                if (parts.length > 1) {
+                    baseCode = parts[0];
+                    quoteCode = parts[1].split(':')[0];
+                }
+            }
             const baseDecimals = this.safeInteger(market, 'base_decimals');
             const quoteDecimals = this.safeInteger(market, 'quote_decimals');
             const linear = true;
-            const type = 'swap';
-            const settle = undefined;
-            const settleId = undefined;
+            const type = 'future';
+            const settle = quoteCode;
+            const settleId = quoteId;
             const active = true;
             const precision = { 'amount': baseDecimals, 'price': quoteDecimals };
+            const symbol = normalized;
+            // if (baseCode && quoteCode && settle) {
+            //     symbol = baseCode + '/' + quoteCode + ':' + settle;
+            // }
             result.push({
                 'id': id,
                 'symbol': symbol,
-                'base': baseId,
-                'quote': quoteId,
+                'base': baseCode,
+                'quote': quoteCode,
                 'baseId': baseId,
                 'quoteId': quoteId,
                 'type': type,
                 'spot': false,
                 'margin': false,
                 'swap': true,
-                'future': false,
+                'future': true,
                 'option': false,
                 'contract': true,
                 'linear': linear,
                 'inverse': !linear,
                 'settle': settle,
                 'settleId': settleId,
+                'contractSize': 1,
                 'active': active,
                 'precision': precision,
                 'limits': {},
@@ -467,14 +580,11 @@ export default class ekiden extends Exchange {
         const quoteDecimals = this.safeInteger(market['info'] || {}, 'quote_decimals');
         const sizeInt = this.safeInteger(trade, 'size');
         const priceInt = this.safeInteger(trade, 'price');
-        let amount = undefined;
-        let price = undefined;
+        let amount = this.fromDecimals(sizeInt, baseDecimals);
+        const price = this.fromDecimals(priceInt, quoteDecimals);
         const datetime = (timestamp !== undefined) ? this.iso8601(timestamp) : undefined;
-        if (baseDecimals !== undefined && sizeInt !== undefined) {
-            amount = sizeInt / Math.pow(10, baseDecimals);
-        }
-        if (quoteDecimals !== undefined && priceInt !== undefined) {
-            price = priceInt / Math.pow(10, quoteDecimals);
+        if (amount !== undefined) {
+            amount = Math.abs(amount);
         }
         const cost = (amount !== undefined && price !== undefined) ? (amount * price) : undefined;
         return this.safeTrade({
@@ -529,7 +639,7 @@ export default class ekiden extends Exchange {
                 continue;
             }
             const key = priceInt.toString();
-            const sizeFloat = (baseDecimals !== undefined) ? (sizeInt / Math.pow(10, baseDecimals)) : undefined;
+            const sizeFloat = this.fromDecimals(Math.abs(sizeInt), baseDecimals);
             if (sizeFloat === undefined) {
                 continue;
             }
@@ -548,14 +658,16 @@ export default class ekiden extends Exchange {
         for (let i = 0; i < bidKeys.length; i++) {
             const k = bidKeys[i];
             const pInt = this.parseToNumeric(k);
-            const pFloat = (quoteDecimals !== undefined) ? (pInt / Math.pow(10, quoteDecimals)) : pInt;
+            let pFloat = this.fromDecimals(pInt, quoteDecimals);
+            pFloat = this.applyPriceMultiplier(pFloat);
             bids.push([pFloat, bidsMap[k]]);
         }
         const askKeys = Object.keys(asksMap);
         for (let i = 0; i < askKeys.length; i++) {
             const k = askKeys[i];
             const pInt = this.parseToNumeric(k);
-            const pFloat = (quoteDecimals !== undefined) ? (pInt / Math.pow(10, quoteDecimals)) : pInt;
+            let pFloat = this.fromDecimals(pInt, quoteDecimals);
+            pFloat = this.applyPriceMultiplier(pFloat);
             asks.push([pFloat, asksMap[k]]);
         }
         const orderbook = { 'bids': bids, 'asks': asks };
@@ -566,10 +678,101 @@ export default class ekiden extends Exchange {
         }
         return result;
     }
+    async fetchPositions(symbols = undefined, params = {}) {
+        await this.loadMarkets();
+        this.checkRequiredCredentials(false);
+        symbols = this.marketSymbols(symbols);
+        const response = await this.v1PrivateGetUserPortfolio(params);
+        const positions = this.safeList(response, 'positions', []);
+        const result = [];
+        for (let i = 0; i < positions.length; i++) {
+            const pos = positions[i];
+            const marketId = this.safeString(pos, 'market_addr');
+            if (marketId === undefined) {
+                continue; // cannot map to symbol
+            }
+            const market = this.safeMarket(marketId);
+            const unified = this.parsePosition(pos, market);
+            if (symbols === undefined || (symbols.indexOf(unified['symbol']) >= 0)) {
+                result.push(unified);
+            }
+        }
+        return result;
+    }
+    parsePosition(position, market = undefined) {
+        const marketId = this.safeString(position, 'market_addr');
+        market = this.safeMarket(marketId, market);
+        const infoMarket = market ? (market['info'] || {}) : {};
+        const baseDecimals = this.safeInteger(infoMarket, 'base_decimals');
+        const quoteDecimals = this.safeInteger(infoMarket, 'quote_decimals');
+        const sizeInt = this.safeInteger(position, 'size');
+        const priceInt = this.safeInteger(position, 'price');
+        const marginInt = this.safeInteger(position, 'margin');
+        const tsSec = this.safeInteger(position, 'timestamp');
+        const timestamp = (tsSec !== undefined) ? (tsSec * 1000) : undefined;
+        const contracts = this.fromDecimals(Math.abs(sizeInt), baseDecimals);
+        let entryPrice = this.fromDecimals(priceInt, quoteDecimals);
+        entryPrice = this.applyPriceMultiplier(entryPrice);
+        let markPx = undefined;
+        const markInt = this.safeInteger(infoMarket, 'mark_price');
+        if (markInt !== undefined) {
+            markPx = this.fromDecimals(markInt, quoteDecimals);
+            markPx = this.applyPriceMultiplier(markPx);
+        }
+        let side = undefined;
+        if (sizeInt !== undefined) {
+            if (sizeInt > 0) {
+                side = 'long';
+            }
+            else if (sizeInt < 0) {
+                side = 'short';
+            }
+        }
+        const notional = (contracts !== undefined && markPx !== undefined) ? (contracts * markPx) : undefined;
+        const collateral = (marginInt !== undefined) ? this.fromDecimals(marginInt, quoteDecimals) : undefined;
+        let unrealizedPnl = undefined;
+        if (markPx !== undefined && entryPrice !== undefined && sizeInt !== undefined) {
+            unrealizedPnl = (markPx - entryPrice) * (sizeInt >= 0 ? 1 : -1) * Math.abs(contracts);
+        }
+        let leverage = undefined;
+        if ((notional !== undefined) && (collateral !== undefined) && (collateral > 0)) {
+            leverage = notional / collateral;
+        }
+        return this.safePosition({
+            'info': position,
+            'id': this.safeString(position, 'sid'),
+            'symbol': market ? market['symbol'] : undefined,
+            'notional': notional,
+            'marginMode': 'cross',
+            'liquidationPrice': undefined,
+            'entryPrice': entryPrice,
+            'unrealizedPnl': unrealizedPnl,
+            'realizedPnl': undefined,
+            'percentage': undefined,
+            'contracts': contracts,
+            'contractSize': undefined,
+            'markPrice': markPx,
+            'lastPrice': undefined,
+            'side': side,
+            'hedged': undefined,
+            'timestamp': timestamp,
+            'datetime': (timestamp !== undefined) ? this.iso8601(timestamp) : undefined,
+            'lastUpdateTimestamp': timestamp,
+            'maintenanceMargin': undefined,
+            'maintenanceMarginPercentage': undefined,
+            'collateral': collateral,
+            'initialMargin': collateral,
+            'initialMarginPercentage': undefined,
+            'leverage': leverage,
+            'marginRatio': undefined,
+            'stopLossPrice': undefined,
+            'takeProfitPrice': undefined,
+        });
+    }
     async fetchBalance(params = {}) {
         // Derive balances from user portfolio endpoint; assumes a single quote asset vault (e.g., USDC)
         this.checkRequiredCredentials();
-        const response = await this.request('user/portfolio', ['v1', 'private'], 'GET', params);
+        const response = await this.v1PrivateGetUserPortfolio(params);
         // response: PortfolioResponse { vault_balances: [ { asset_addr, balance } ], summary: { total_margin_used } }
         const vaults = this.safeValue(response, 'vault_balances', []);
         const summary = this.safeValue(response, 'summary', {});
@@ -613,13 +816,63 @@ export default class ekiden extends Exchange {
         if (usedRaw !== undefined) {
             used = (decimals !== undefined) ? (usedRaw / Math.pow(10, decimals)) : usedRaw;
         }
-        const free = (total !== undefined && used !== undefined) ? (total - used) : undefined;
+        // clamp to avoid negative free due to inconsistent margin usage values
+        if (total !== undefined) {
+            if (used === undefined) {
+                used = 0;
+            }
+            if (used > total) {
+                used = total;
+            }
+        }
+        let free = (total !== undefined && used !== undefined) ? (total - used) : undefined;
+        if (free !== undefined && free < 0) {
+            free = 0;
+        }
         const result = { 'info': response };
         result[code] = {
             'free': free,
             'used': used,
             'total': total,
         };
+        // For linear perps, allow shorting without base inventory by exposing a synthetic base capacity
+        // Compute per-market base capacity from quote free and mark price with max leverage
+        try {
+            await this.loadMarkets();
+            const marketIds = Object.keys(this.markets_by_id || {});
+            for (let i = 0; i < marketIds.length; i++) {
+                let m = this.markets_by_id[marketIds[i]];
+                if (Array.isArray(m) && m.length > 0) {
+                    m = m[0];
+                }
+                const info = m ? (m['info'] || {}) : {};
+                const baseCode = this.safeString(m, 'base');
+                const quoteDecimals2 = this.safeInteger(info, 'quote_decimals');
+                const markInt2 = this.safeInteger(info, 'mark_price');
+                const leverageMax = this.safeNumber(info, 'max_leverage', 1);
+                if (baseCode && (result[baseCode] === undefined)) {
+                    let markPx = this.fromDecimals(markInt2, quoteDecimals2);
+                    markPx = this.applyPriceMultiplier(markPx);
+                    if ((free !== undefined) && (free > 0) && (markPx !== undefined) && (markPx > 0)) {
+                        const baseCapacity = (free * leverageMax) / markPx;
+                        result[baseCode] = {
+                            'free': baseCapacity,
+                            'used': 0,
+                            'total': baseCapacity,
+                        };
+                    }
+                    else {
+                        // if no mark price or no quote free, still expose zero to avoid KeyError
+                        result[baseCode] = { 'free': 0, 'used': 0, 'total': 0 };
+                    }
+                }
+            }
+        }
+        catch (e) {
+            // ignore synthetic capacity errors
+            // eslint-disable-next-line no-unused-vars
+            const _ = e;
+        }
         return this.safeBalance(result);
     }
     parseOHLCV(ohlcv, market = undefined) {
@@ -653,39 +906,68 @@ export default class ekiden extends Exchange {
         await this.loadMarkets();
         const market = this.market(this.normalizeSymbol(symbol));
         const response = await this.v1PublicGetMarketCandlesStatsMarketAddr(this.extend({ 'market_addr': market['id'] }, params));
-        // MarketStatsResponse: current_price, price_24h_ago, price_change_24h, high_24h, low_24h, volume_24h (quote volume), trades_24h
-        const last = this.safeNumber(response, 'current_price');
-        const high = this.safeNumber(response, 'high_24h');
-        const low = this.safeNumber(response, 'low_24h');
-        const percentage = this.safeNumber(response, 'price_change_24h');
-        const rawQuoteVolume = this.safeNumber(response, 'volume_24h');
-        const quoteVolume = ((rawQuoteVolume === undefined) || !isFinite(rawQuoteVolume)) ? 0 : rawQuoteVolume;
-        let baseVolume = 0;
-        if ((quoteVolume > 0) && (last !== undefined) && (last > 0)) {
-            baseVolume = quoteVolume / last;
+        const ticker = this.parseTickerStats(response, market);
+        // Fallback: when 24h volumes are missing/zero from stats, compute from candles
+        const missingQuote = (ticker['quoteVolume'] === undefined) || (ticker['quoteVolume'] <= 0);
+        const missingBase = (ticker['baseVolume'] === undefined) || (ticker['baseVolume'] <= 0);
+        if (missingQuote && missingBase) {
+            const fromCandles = await this.compute24hVolumesFromCandles(market);
+            if ((fromCandles['baseVolume'] !== undefined) && (fromCandles['baseVolume'] > 0)) {
+                ticker['baseVolume'] = fromCandles['baseVolume'];
+            }
+            if ((fromCandles['quoteVolume'] !== undefined) && (fromCandles['quoteVolume'] > 0)) {
+                ticker['quoteVolume'] = fromCandles['quoteVolume'];
+            }
+            else if ((ticker['baseVolume'] !== undefined) && (ticker['baseVolume'] > 0)) {
+                const last = ticker['last'];
+                if ((last !== undefined) && (last > 0)) {
+                    ticker['quoteVolume'] = ticker['baseVolume'] * last;
+                }
+            }
         }
-        return this.safeTicker({
-            'symbol': market['symbol'],
-            'timestamp': undefined,
-            'datetime': undefined,
-            'high': high,
-            'low': low,
-            'bid': undefined,
-            'bidVolume': undefined,
-            'ask': undefined,
-            'askVolume': undefined,
-            'vwap': undefined,
-            'open': this.safeNumber(response, 'price_24h_ago'),
-            'close': last,
-            'last': last,
-            'previousClose': undefined,
-            'change': undefined,
-            'percentage': percentage,
-            'average': undefined,
-            'baseVolume': baseVolume,
-            'quoteVolume': quoteVolume,
-            'info': response,
-        }, market);
+        return ticker;
+    }
+    /**
+     * @method
+     * @name ekiden#fetchTickers
+     * @description fetches price tickers for multiple markets, statistical information calculated over the past 24 hours for each market
+     * @param {string[]|undefined} symbols unified symbols of the markets to fetch the ticker for, all market tickers are returned if not assigned
+     * @param {object} [params] extra parameters specific to the exchange API endpoint
+     * @returns {object} a dictionary of tickers indexed by market symbol
+     */
+    async fetchTickers(symbols = undefined, params = {}) {
+        await this.loadMarkets();
+        symbols = this.marketSymbols(symbols);
+        let symbolsArray = symbols;
+        if (symbolsArray === undefined) {
+            symbolsArray = this.symbols;
+        }
+        const result = {};
+        for (let i = 0; i < symbolsArray.length; i++) {
+            const symbol = symbolsArray[i];
+            const market = this.market(this.normalizeSymbol(symbol));
+            const response = await this.v1PublicGetMarketCandlesStatsMarketAddr(this.extend({ 'market_addr': market['id'] }, params));
+            const ticker = this.parseTickerStats(response, market);
+            const missingQuote = (ticker['quoteVolume'] === undefined) || (ticker['quoteVolume'] <= 0);
+            const missingBase = (ticker['baseVolume'] === undefined) || (ticker['baseVolume'] <= 0);
+            if (missingQuote && missingBase) {
+                const fromCandles = await this.compute24hVolumesFromCandles(market);
+                if ((fromCandles['baseVolume'] !== undefined) && (fromCandles['baseVolume'] > 0)) {
+                    ticker['baseVolume'] = fromCandles['baseVolume'];
+                }
+                if ((fromCandles['quoteVolume'] !== undefined) && (fromCandles['quoteVolume'] > 0)) {
+                    ticker['quoteVolume'] = fromCandles['quoteVolume'];
+                }
+                else if ((ticker['baseVolume'] !== undefined) && (ticker['baseVolume'] > 0)) {
+                    const last = ticker['last'];
+                    if ((last !== undefined) && (last > 0)) {
+                        ticker['quoteVolume'] = ticker['baseVolume'] * last;
+                    }
+                }
+            }
+            result[market['symbol']] = ticker;
+        }
+        return result;
     }
     parseOrder(order, market = undefined) {
         const id = this.safeString(order, 'sid');
@@ -698,15 +980,12 @@ export default class ekiden extends Exchange {
         market = market || this.safeMarket(marketId);
         const baseDecimals = this.safeInteger(market['info'] || {}, 'base_decimals');
         const quoteDecimals = this.safeInteger(market['info'] || {}, 'quote_decimals');
-        const size = this.safeNumber(order, 'size');
+        const sizeInt = this.safeInteger(order, 'size');
         const priceInt = this.safeInteger(order, 'price');
-        let amount = size;
-        let price = undefined;
-        if (baseDecimals !== undefined && size !== undefined) {
-            amount = size / Math.pow(10, baseDecimals);
-        }
-        if (quoteDecimals !== undefined && priceInt !== undefined) {
-            price = priceInt / Math.pow(10, quoteDecimals);
+        let amount = this.fromDecimals(sizeInt, baseDecimals);
+        const price = this.fromDecimals(priceInt, quoteDecimals);
+        if (amount !== undefined) {
+            amount = Math.abs(amount);
         }
         let status = undefined;
         // map to ccxt statuses
@@ -780,7 +1059,7 @@ export default class ekiden extends Exchange {
             throw new ArgumentsRequired(this.id + ' fetchOrder() requires a symbol to be specified');
         }
         const market = this.market(this.normalizeSymbol(symbol));
-        const request = { 'market_addr': market['id'], 'per_page': 50 };
+        const request = { 'market_addr': market['id'], 'per_page': 100 };
         const response = await this.v1PrivateGetUserOrders(this.extend(request, params));
         for (let i = 0; i < response.length; i++) {
             const item = response[i];
@@ -814,7 +1093,93 @@ export default class ekiden extends Exchange {
         }
         const leverage = this.safeInteger(params, 'leverage', 1);
         const commitFlag = this.safeBool(params, 'commit', true);
-        const order = this.scaleOrderFields(market, side, amount, price, type, leverage);
+        const postOnlyParam = this.safeBool(params, 'postOnly');
+        const reduceOnlyParam = this.safeBool(params, 'reduceOnly');
+        params = this.omit(params, ['postOnly', 'reduceOnly']);
+        // Handle market buy semantics: allow quote-cost via params.cost, enforce price presence
+        let adjustedAmount = amount;
+        const adjustedPrice = price;
+        if ((type === 'market') && (side === 'buy')) {
+            const cost = this.safeNumber(params, 'cost');
+            if (cost !== undefined) {
+                if (adjustedPrice === undefined) {
+                    throw new InvalidOrder(this.id + ' createOrder() requires price when cost is provided for market buy orders');
+                }
+                adjustedAmount = cost / adjustedPrice;
+                params = this.omit(params, 'cost');
+            }
+            else {
+                const requiresPrice = this.safeBool(this.options, 'createMarketBuyOrderRequiresPrice', true);
+                if (requiresPrice && (adjustedPrice === undefined)) {
+                    throw new InvalidOrder(this.id + ' createOrder() requires the price argument for market buy orders to calculate notional for validation');
+                }
+            }
+        }
+        // Honor reduceOnly: ensure order reduces existing position and does not exceed position size
+        if (reduceOnlyParam) {
+            try {
+                const allPositions = await this.fetchPositions(undefined, {});
+                // find position for this market
+                let posForMarket = undefined;
+                for (let i = 0; i < allPositions.length; i++) {
+                    const p = allPositions[i];
+                    if (p['symbol'] === market['symbol']) {
+                        posForMarket = p;
+                        break;
+                    }
+                }
+                const posContracts = posForMarket ? this.safeNumber(posForMarket, 'contracts') : 0;
+                const posSide = posForMarket ? this.safeString(posForMarket, 'side') : undefined;
+                const absContracts = (posContracts !== undefined) ? Math.abs(posContracts) : 0;
+                if (!posForMarket || !posSide || (absContracts === 0)) {
+                    throw new InvalidOrder(this.id + ' createOrder() reduceOnly is set but no position to reduce for ' + market['symbol']);
+                }
+                if ((posSide === 'long' && side !== 'sell') || (posSide === 'short' && side !== 'buy')) {
+                    throw new InvalidOrder(this.id + ' createOrder() reduceOnly order side must reduce the current position side');
+                }
+                // clamp amount not to exceed current position size
+                if ((adjustedAmount !== undefined) && (absContracts !== undefined)) {
+                    adjustedAmount = Math.min(adjustedAmount, absContracts);
+                    if (adjustedAmount <= 0) {
+                        throw new InvalidOrder(this.id + ' createOrder() reduceOnly adjusted amount is zero');
+                    }
+                }
+            }
+            catch (e) {
+                if (e instanceof InvalidOrder) {
+                    throw e;
+                }
+                // if positions endpoint fails, fallback to proceed (cannot guarantee reduce-only without server support)
+            }
+        }
+        // Honor postOnly: ensure limit order does not cross the spread
+        if (postOnlyParam) {
+            const isLimit = (type === 'limit');
+            if (!isLimit) {
+                throw new InvalidOrder(this.id + ' createOrder() postOnly is only supported for limit orders');
+            }
+            if (adjustedPrice === undefined) {
+                throw new InvalidOrder(this.id + ' createOrder() postOnly requires a price');
+            }
+            try {
+                const ob = await this.fetchOrderBook(market['symbol'], 1);
+                const bestAsk = (ob['asks'] && ob['asks'].length > 0) ? ob['asks'][0][0] : undefined;
+                const bestBid = (ob['bids'] && ob['bids'].length > 0) ? ob['bids'][0][0] : undefined;
+                if (side === 'buy' && (bestAsk !== undefined) && (adjustedPrice >= bestAsk)) {
+                    throw new InvalidOrder(this.id + ' createOrder() postOnly buy price would cross the best ask');
+                }
+                if (side === 'sell' && (bestBid !== undefined) && (adjustedPrice <= bestBid)) {
+                    throw new InvalidOrder(this.id + ' createOrder() postOnly sell price would cross the best bid');
+                }
+            }
+            catch (e) {
+                if (e instanceof InvalidOrder) {
+                    throw e;
+                }
+                // if orderbook fetch fails, proceed (cannot guarantee post-only)
+            }
+        }
+        const order = this.scaleOrderFields(market, side, adjustedAmount, adjustedPrice, type, leverage);
         const payload = { 'type': 'order_create', 'orders': [order] };
         const nonce = ('nonce' in params) ? this.safeInteger(params, 'nonce') : this.milliseconds();
         request = this.buildSignedIntent(payload, nonce);
@@ -881,5 +1246,41 @@ export default class ekiden extends Exchange {
             responseSigned2 = await this.v1PrivatePostUserIntent(request);
         }
         return this.parseCancelOrderResult(responseSigned2, id, market);
+    }
+    async setLeverage(leverage, symbol = undefined, params = {}) {
+        await this.loadMarkets();
+        if (symbol === undefined) {
+            throw new ArgumentsRequired(this.id + ' setLeverage() requires a symbol argument');
+        }
+        const market = this.market(this.normalizeSymbol(symbol));
+        const hasPayload = this.isValidSignedIntentParams(params, 'leverage_assign');
+        let request = {};
+        if (hasPayload) {
+            const commitProvided = this.safeBool(params, 'commit', false);
+            request = this.omit(params, ['commit']);
+            let responseProvided = undefined;
+            if (commitProvided) {
+                responseProvided = await this.v1PrivatePostUserIntentCommit(request);
+            }
+            else {
+                responseProvided = await this.v1PrivatePostUserIntent(request);
+            }
+            return { 'info': responseProvided, 'symbol': market['symbol'] };
+        }
+        if (!this.secret) {
+            throw new NotSupported(this.id + ' setLeverage() requires either params { payload, signature, nonce } or exchange.secret to sign the intent');
+        }
+        const commitFlag = this.safeBool(params, 'commit', true);
+        const payload = { 'type': 'leverage_assign', 'leverage': leverage, 'market_addr': market['id'] };
+        const nonce = ('nonce' in params) ? this.safeInteger(params, 'nonce') : this.milliseconds();
+        request = this.buildSignedIntent(payload, nonce);
+        let responseSigned = undefined;
+        if (commitFlag) {
+            responseSigned = await this.v1PrivatePostUserIntentCommit(request);
+        }
+        else {
+            responseSigned = await this.v1PrivatePostUserIntent(request);
+        }
+        return { 'info': responseSigned, 'symbol': market['symbol'] };
     }
 }

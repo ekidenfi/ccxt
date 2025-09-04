@@ -66,6 +66,27 @@ async function main () {
         console.log('fetchBalance failed (requires auth):', e.message);
     }
 
+    // setLeverage (auto-signed leverage_assign intent)
+    try {
+        const res = await ex.setLeverage(1, symbol, { commit: true });
+        console.log('setLeverage:', res && res.info && (res.info.status !== undefined ? res.info.status : 'ok'));
+    } catch (e) {
+        console.log('setLeverage failed:', e.message);
+    }
+
+    // fetchPositions (unified positions)
+    try {
+        const positions = await ex.fetchPositions([symbol]);
+        if (positions.length) {
+            const p = positions[0];
+            console.log('fetchPositions:', positions.length, { symbol: p.symbol, side: p.side, contracts: p.contracts, entryPrice: p.entryPrice });
+        } else {
+            console.log('fetchPositions: no positions');
+        }
+    } catch (e) {
+        console.log('fetchPositions failed:', e.message);
+    }
+
     // watchOHLCV (Pro)
     try {
         if (ex.has['watchOHLCV']) {
@@ -96,6 +117,15 @@ async function main () {
         console.log('createLimitOrder:', createdOrder2.id);
     } catch (e) {
         console.log('createLimitOrder failed:', e.message);
+    }
+
+    // createLimitSellOrder (auto-signed intent)
+    let createdOrder3
+    try {
+        createdOrder3 = await ex.createLimitOrder(symbol, 'sell', 0.001, 1, { leverage: 1, commit: true });
+        console.log('createLimitSellOrder:', createdOrder3.id);
+    } catch (e) {
+        console.log('createLimitSellOrder failed:', e.message);
     }
 
     // cancelOrder (auto-signed intent): cancel the last created order if available

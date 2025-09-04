@@ -25,6 +25,12 @@ abstract class ekiden extends \ccxt\async\Exchange {
     public function v1_private_get_user_orders($params = array()) {
         return $this->request('user/orders', array('v1', 'private'), 'GET', $params, null, null, array("cost" => 1));
     }
+    public function v1_private_get_user_portfolio($params = array()) {
+        return $this->request('user/portfolio', array('v1', 'private'), 'GET', $params, null, null, array("cost" => 1));
+    }
+    public function v1_private_get_user_positions($params = array()) {
+        return $this->request('user/positions', array('v1', 'private'), 'GET', $params, null, null, array("cost" => 1));
+    }
     public function v1_private_post_user_intent($params = array()) {
         return $this->request('user/intent', array('v1', 'private'), 'POST', $params, null, null, array("cost" => 1));
     }
@@ -48,6 +54,12 @@ abstract class ekiden extends \ccxt\async\Exchange {
     }
     public function v1PrivateGetUserOrders($params = array()) {
         return $this->request('user/orders', array('v1', 'private'), 'GET', $params, null, null, array("cost" => 1));
+    }
+    public function v1PrivateGetUserPortfolio($params = array()) {
+        return $this->request('user/portfolio', array('v1', 'private'), 'GET', $params, null, null, array("cost" => 1));
+    }
+    public function v1PrivateGetUserPositions($params = array()) {
+        return $this->request('user/positions', array('v1', 'private'), 'GET', $params, null, null, array("cost" => 1));
     }
     public function v1PrivatePostUserIntent($params = array()) {
         return $this->request('user/intent', array('v1', 'private'), 'POST', $params, null, null, array("cost" => 1));

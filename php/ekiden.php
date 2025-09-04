@@ -36,6 +36,9 @@ class ekiden extends Exchange {
     }
 
     public function normalize_symbol(string $symbol): string {
+        // if ($symbol->includes (':')) {
+        //     return $symbol;
+        // }
         $s = strtoupper($symbol);
         if (mb_strpos($s, '/') !== false) {
             $parts = explode('/', $s);
@@ -68,7 +71,6 @@ class ekiden extends Exchange {
         }
         return $s;
     }
-    }
 
     public function intent_seed_hex(): string {
         // Same SEED used in ts-sdk composeHexPayload
@@ -77,17 +79,8 @@ class ekiden extends Exchange {
 
     public function serialize_string_hex(string $value): string {
         $bin = $this->encode($value);
-        // Build ULEB128 $length manually using numberToLE for cross-language compatibility
         $length = $this->binary_length($bin);
-        $v = $length;
-        $ulebHex = '';
-        while ($v >= 0x80) {
-            $low7 = fmod($v, 128);
-            $byteVal = $low7 + 0x80;
-            $ulebHex .= bin2hex($this->number_to_le($byteVal, 1));
-            $v = (int) floor($v / 0x80);
-        }
-        $ulebHex .= bin2hex($this->number_to_le($v, 1));
+        $ulebHex = $this->encode_uleb128_length($length);
         $dataHex = bin2hex($bin);
         return $ulebHex . $dataHex;
     }
@@ -103,6 +96,119 @@ class ekiden extends Exchange {
         }
         $uleb .= bin2hex($this->number_to_le($v, 1));
         return $uleb;
+    }
+
+    public function from_decimals(float $valueInt, float $decimals): float {
+        if ($valueInt === null) {
+            return null;
+        }
+        if ($decimals === null) {
+            return $valueInt;
+        }
+        return $valueInt / pow(10, $decimals);
+    }
+
+    public function apply_price_multiplier(float $price): float {
+        $multiplier = $this->safe_number($this->options, 'priceMultiplier', 1);
+        if ($price === null) {
+            return $price;
+        }
+        if (($multiplier !== null) && ($multiplier !== 1)) {
+            return $price * $multiplier;
+        }
+        return $price;
+    }
+
+    public function parse_ticker_stats(array $response, array $market): array {
+        $last = $this->safe_number($response, 'current_price');
+        $high = $this->safe_number($response, 'high_24h');
+        $low = $this->safe_number($response, 'low_24h');
+        $percentage = $this->safe_number($response, 'price_change_24h');
+        $rawQuoteVolume = $this->safe_number($response, 'volume_24h');
+        $quoteVolume = 0;
+        if (($rawQuoteVolume !== null) && ($rawQuoteVolume > 0)) {
+            $quoteVolume = $rawQuoteVolume;
+        }
+        $baseVolume = 0;
+        if (($quoteVolume > 0) && ($last !== null) && ($last > 0)) {
+            $baseVolume = $quoteVolume / $last;
+        }
+        $infoMarket = $market['info'] || array();
+        $quoteDecimals = $this->safe_integer($infoMarket, 'quote_decimals');
+        $markInt = $this->safe_integer($infoMarket, 'mark_price');
+        $oracleInt = $this->safe_integer($infoMarket, 'oracle_price');
+        $markPrice = $this->from_decimals($markInt, $quoteDecimals);
+        $indexPrice = $this->from_decimals($oracleInt, $quoteDecimals);
+        $last = $this->apply_price_multiplier($last);
+        $high = $this->apply_price_multiplier($high);
+        $low = $this->apply_price_multiplier($low);
+        $markPrice = $this->apply_price_multiplier($markPrice);
+        $indexPrice = $this->apply_price_multiplier($indexPrice);
+        $now = $this->milliseconds();
+        return $this->safe_ticker(array(
+            'symbol' => $market['symbol'],
+            'timestamp' => $now,
+            'datetime' => $this->iso8601($now),
+            'high' => $high,
+            'low' => $low,
+            'bid' => null,
+            'bidVolume' => null,
+            'ask' => null,
+            'askVolume' => null,
+            'vwap' => null,
+            'open' => $this->safe_number($response, 'price_24h_ago'),
+            'close' => $last,
+            'last' => $last,
+            'previousClose' => null,
+            'change' => null,
+            'percentage' => $percentage,
+            'average' => null,
+            'baseVolume' => $baseVolume,
+            'quoteVolume' => $quoteVolume,
+            'markPrice' => $markPrice,
+            'indexPrice' => $indexPrice,
+            'info' => $response,
+        ), $market);
+    }
+
+    public function compute2_4h_volumes_from_candles(array $market): array {
+        try {
+            $since = $this->milliseconds() - 24 * 60 * 60 * 1000;
+            $candles = $this->fetch_ohlcv($market['symbol'], '1m', $since, 1440);
+            $baseSum = 0;
+            $quoteSum = 0;
+            $infoMarket = $market['info'] || array();
+            $baseDecimals = $this->safe_integer($infoMarket, 'base_decimals');
+            for ($i = 0; $i < count($candles); $i++) {
+                $volRaw = $candles[$i][5];
+                $close = $candles[$i][4];
+                if ($volRaw !== null) {
+                    $volBase = $volRaw;
+                    if ($baseDecimals !== null) {
+                        $volBase = $volRaw / pow(10, $baseDecimals);
+                    }
+                    if (($volBase !== null) && ($volBase > 0)) {
+                        $baseSum .= $volBase;
+                        if (($close !== null) && ($close > 0)) {
+                            $quoteSum .= $volBase * $close;
+                        }
+                    }
+                }
+            }
+            $result = array();
+            if ($baseSum > 0) {
+                $result['baseVolume'] = $baseSum;
+            }
+            if ($quoteSum > 0) {
+                $result['quoteVolume'] = $quoteSum;
+            }
+            return $result;
+        } catch (Exception $e) {
+            // ignore fallback errors
+            // eslint-disable-next-line no-unused-vars
+            $_ = $e;
+            return array();
+        }
     }
 
     public function serialize_action_payload_hex(array $payload): string {
@@ -201,7 +307,7 @@ class ekiden extends Exchange {
             }
         }
         $ts = $this->safe_integer($response, 'timestamp');
-        $timestamp = ($ts !== null) ? $this->parse_to_int($ts) : null;
+        $timestamp = ($ts !== null) ? $this->parse_to_int($ts * 1000) : null;
         $datetime = $this->iso8601($timestamp);
         $symbolOut = $market ? $market['symbol'] : null;
         return $this->safe_order(array(
@@ -248,7 +354,7 @@ class ekiden extends Exchange {
             $id = $this->safe_string($response, 'sid');
         }
         $ts = $this->safe_integer($response, 'timestamp');
-        $timestamp = ($ts !== null) ? $this->parse_to_int($ts) : null;
+        $timestamp = ($ts !== null) ? $this->parse_to_int($ts * 1000) : null;
         $datetime = $this->iso8601($timestamp);
         $symbolOut = $market ? $market['symbol'] : null;
         return $this->safe_order(array(
@@ -292,10 +398,10 @@ class ekiden extends Exchange {
             'dex' => true,
             'has' => array(
                 'CORS' => null,
-                'spot' => true,
+                'spot' => false,
                 'margin' => false,
                 'swap' => true,
-                'future' => true,
+                'future' => false,
                 'option' => false,
                 'cancelAllOrders' => false,
                 'cancelOrder' => true,
@@ -308,11 +414,12 @@ class ekiden extends Exchange {
                 'fetchOpenOrders' => true,
                 'fetchOrder' => true,
                 'fetchOrderBook' => true,
-                'fetchPositions' => false,
+                'fetchPositions' => true,
                 'fetchTicker' => true,
                 'fetchTickers' => true,
                 'fetchTrades' => true,
                 'sandbox' => true,
+                'setLeverage' => true,
             ),
             'timeframes' => array(
                 '1m' => '1m',
@@ -357,6 +464,8 @@ class ekiden extends Exchange {
                     'private' => array(
                         'get' => array(
                             'user/orders' => 1,
+                            'user/portfolio' => 1,
+                            'user/positions' => 1,
                         ),
                         'post' => array(
                             'user/intent' => 1,
@@ -374,20 +483,12 @@ class ekiden extends Exchange {
                 ),
             ),
             'options' => array(
+                'defaultType' => 'swap',
                 'sandboxMode' => true,
+                'priceMultiplier' => 1,
+                'createMarketBuyOrderRequiresPrice' => true,
             ),
             'commonCurrencies' => array(
-            ),
-            'spot' => array(
-                'extends' => 'default',
-            ),
-            'future' => array(
-                'linear' => array(
-                    'extends' => 'forPerps',
-                ),
-                'inverse' => array(
-                    'extends' => 'forPerps',
-                ),
             ),
         ));
     }
@@ -423,35 +524,50 @@ class ekiden extends Exchange {
             $market = $response[$i];
             $id = $this->safe_string($market, 'addr');
             $rawSymbol = $this->safe_string($market, 'symbol');
-            $symbol = ($rawSymbol !== null) ? $this->normalize_symbol($rawSymbol) : null;
+            $normalized = ($rawSymbol !== null) ? $this->normalize_symbol($rawSymbol) : null;
             $baseId = $this->safe_string($market, 'base_addr');
             $quoteId = $this->safe_string($market, 'quote_addr');
+            // derive human-readable currency codes from $normalized $symbol
+            $baseCode = null;
+            $quoteCode = null;
+            if ($normalized) {
+                $parts = explode('/', $normalized);
+                if (strlen($parts) > 1) {
+                    $baseCode = $parts[0];
+                    $quoteCode = explode(':', $parts[1])[0];
+                }
+            }
             $baseDecimals = $this->safe_integer($market, 'base_decimals');
             $quoteDecimals = $this->safe_integer($market, 'quote_decimals');
             $linear = true;
-            $type = 'swap';
-            $settle = null;
-            $settleId = null;
+            $type = 'future';
+            $settle = $quoteCode;
+            $settleId = $quoteId;
             $active = true;
             $precision = array( 'amount' => $baseDecimals, 'price' => $quoteDecimals );
+            $symbol = $normalized;
+            // if ($baseCode && $quoteCode && $settle) {
+            //     $symbol = $baseCode . '/' . $quoteCode . ':' . $settle;
+            // }
             $result[] = array(
                 'id' => $id,
                 'symbol' => $symbol,
-                'base' => $baseId,
-                'quote' => $quoteId,
+                'base' => $baseCode,
+                'quote' => $quoteCode,
                 'baseId' => $baseId,
                 'quoteId' => $quoteId,
                 'type' => $type,
                 'spot' => false,
                 'margin' => false,
                 'swap' => true,
-                'future' => false,
+                'future' => true,
                 'option' => false,
                 'contract' => true,
                 'linear' => $linear,
                 'inverse' => !$linear,
                 'settle' => $settle,
                 'settleId' => $settleId,
+                'contractSize' => 1,
                 'active' => $active,
                 'precision' => $precision,
                 'limits' => array(),
@@ -472,17 +588,11 @@ class ekiden extends Exchange {
         $quoteDecimals = $this->safe_integer($market['info'] || array(), 'quote_decimals');
         $sizeInt = $this->safe_integer($trade, 'size');
         $priceInt = $this->safe_integer($trade, 'price');
-        $amount = null;
-        $price = null;
+        $amount = $this->from_decimals($sizeInt, $baseDecimals);
+        $price = $this->from_decimals($priceInt, $quoteDecimals);
         $datetime = ($timestamp !== null) ? $this->iso8601($timestamp) : null;
-        if ($baseDecimals !== null && $sizeInt !== null) {
-            $amount = $sizeInt / pow(10, $baseDecimals);
-        }
         if ($amount !== null) {
             $amount = abs($amount);
-        }
-        if ($quoteDecimals !== null && $priceInt !== null) {
-            $price = $priceInt / pow(10, $quoteDecimals);
         }
         $cost = ($amount !== null && $price !== null) ? ($amount * $price) : null;
         return $this->safe_trade(array(
@@ -539,7 +649,7 @@ class ekiden extends Exchange {
                 continue;
             }
             $key = (string) $priceInt;
-            $sizeFloat = ($baseDecimals !== null) ? (abs($sizeInt) / pow(10, $baseDecimals)) : null;
+            $sizeFloat = $this->from_decimals(abs($sizeInt), $baseDecimals);
             if ($sizeFloat === null) {
                 continue;
             }
@@ -557,14 +667,16 @@ class ekiden extends Exchange {
         for ($i = 0; $i < count($bidKeys); $i++) {
             $k = $bidKeys[$i];
             $pInt = $this->parse_to_numeric($k);
-            $pFloat = ($quoteDecimals !== null) ? ($pInt / pow(10, $quoteDecimals)) : $pInt;
+            $pFloat = $this->from_decimals($pInt, $quoteDecimals);
+            $pFloat = $this->apply_price_multiplier($pFloat);
             $bids[] = [ $pFloat, $bidsMap[$k] ];
         }
         $askKeys = is_array($asksMap) ? array_keys($asksMap) : array();
         for ($i = 0; $i < count($askKeys); $i++) {
             $k = $askKeys[$i];
             $pInt = $this->parse_to_numeric($k);
-            $pFloat = ($quoteDecimals !== null) ? ($pInt / pow(10, $quoteDecimals)) : $pInt;
+            $pFloat = $this->from_decimals($pInt, $quoteDecimals);
+            $pFloat = $this->apply_price_multiplier($pFloat);
             $asks[] = [ $pFloat, $asksMap[$k] ];
         }
         $orderbook = array( 'bids' => $bids, 'asks' => $asks );
@@ -576,10 +688,102 @@ class ekiden extends Exchange {
         return $result;
     }
 
+    public function fetch_positions(?array $symbols = null, $params = array ()): array {
+        $this->load_markets();
+        $this->check_required_credentials(false);
+        $symbols = $this->market_symbols($symbols);
+        $response = $this->v1PrivateGetUserPortfolio ($params);
+        $positions = $this->safe_list($response, 'positions', array());
+        $result => Positionarray() = array();
+        for ($i = 0; $i < count($positions); $i++) {
+            $pos = $positions[$i];
+            $marketId = $this->safe_string($pos, 'market_addr');
+            if ($marketId === null) {
+                continue; // cannot map to symbol
+            }
+            $market = $this->safe_market($marketId);
+            $unified = $this->parse_position($pos, $market);
+            if ($symbols === null || (mb_strpos($symbols, $unified['symbol']) !== false)) {
+                $result[] = $unified;
+            }
+        }
+        return $result;
+    }
+
+    public function parse_position(array $position, ?array $market = null): array {
+        $marketId = $this->safe_string($position, 'market_addr');
+        $market = $this->safe_market($marketId, $market);
+        $infoMarket = $market ? ($market['info'] || array()) : array();
+        $baseDecimals = $this->safe_integer($infoMarket, 'base_decimals');
+        $quoteDecimals = $this->safe_integer($infoMarket, 'quote_decimals');
+        $sizeInt = $this->safe_integer($position, 'size');
+        $priceInt = $this->safe_integer($position, 'price');
+        $marginInt = $this->safe_integer($position, 'margin');
+        $tsSec = $this->safe_integer($position, 'timestamp');
+        $timestamp = ($tsSec !== null) ? ($tsSec * 1000) : null;
+        $contracts = $this->from_decimals(abs($sizeInt), $baseDecimals);
+        $entryPrice = $this->from_decimals($priceInt, $quoteDecimals);
+        $entryPrice = $this->apply_price_multiplier($entryPrice);
+        $markPx = null;
+        $markInt = $this->safe_integer($infoMarket, 'mark_price');
+        if ($markInt !== null) {
+            $markPx = $this->from_decimals($markInt, $quoteDecimals);
+            $markPx = $this->apply_price_multiplier($markPx);
+        }
+        $side = null;
+        if ($sizeInt !== null) {
+            if ($sizeInt > 0) {
+                $side = 'long';
+            } elseif ($sizeInt < 0) {
+                $side = 'short';
+            }
+        }
+        $notional = ($contracts !== null && $markPx !== null) ? ($contracts * $markPx) : null;
+        $collateral = ($marginInt !== null) ? $this->from_decimals($marginInt, $quoteDecimals) : null;
+        $unrealizedPnl = null;
+        if ($markPx !== null && $entryPrice !== null && $sizeInt !== null) {
+            $unrealizedPnl = ($markPx - $entryPrice) * ($sizeInt >= 0 ? 1 : -1) * abs($contracts);
+        }
+        $leverage = null;
+        if (($notional !== null) && ($collateral !== null) && ($collateral > 0)) {
+            $leverage = $notional / $collateral;
+        }
+        return $this->safe_position(array(
+            'info' => $position,
+            'id' => $this->safe_string($position, 'sid'),
+            'symbol' => $market ? $market['symbol'] : null,
+            'notional' => $notional,
+            'marginMode' => 'cross',
+            'liquidationPrice' => null,
+            'entryPrice' => $entryPrice,
+            'unrealizedPnl' => $unrealizedPnl,
+            'realizedPnl' => null,
+            'percentage' => null,
+            'contracts' => $contracts,
+            'contractSize' => null,
+            'markPrice' => $markPx,
+            'lastPrice' => null,
+            'side' => $side,
+            'hedged' => null,
+            'timestamp' => $timestamp,
+            'datetime' => ($timestamp !== null) ? $this->iso8601($timestamp) : null,
+            'lastUpdateTimestamp' => $timestamp,
+            'maintenanceMargin' => null,
+            'maintenanceMarginPercentage' => null,
+            'collateral' => $collateral,
+            'initialMargin' => $collateral,
+            'initialMarginPercentage' => null,
+            'leverage' => $leverage,
+            'marginRatio' => null,
+            'stopLossPrice' => null,
+            'takeProfitPrice' => null,
+        ));
+    }
+
     public function fetch_balance($params = array ()): array {
-        // Derive balances from user portfolio endpoint; assumes a single quote asset vault (e.g., USDC)
+        // Derive balances from user portfolio endpoint; assumes a single quote asset vault ($e->g., USDC)
         $this->check_required_credentials();
-        $response = $this->request('user/portfolio', array( 'v1', 'private' ), 'GET', $params);
+        $response = $this->v1PrivateGetUserPortfolio ($params);
         // $response => PortfolioResponse array( vault_balances => array( array( asset_addr, balance ) ), $summary => array( total_margin_used ) )
         $vaults = $this->safe_value($response, 'vault_balances', array());
         $summary = $this->safe_value($response, 'summary', array());
@@ -601,7 +805,7 @@ class ekiden extends Exchange {
                 $quoteId = $this->safe_string($info, 'quote_addr');
                 if ($quoteId === $assetAddr) {
                     $decimals = $this->safe_integer($info, 'quote_decimals');
-                    // Best-effort $code detection => try to parse from symbol suffix (e.g., BTC/USDC)
+                    // Best-effort $code detection => try to parse from symbol suffix ($e->g., BTC/USDC)
                     $sym = $this->safe_string($m, 'symbol');
                     if ($sym) {
                         $parts = explode('/', $sym);
@@ -623,13 +827,61 @@ class ekiden extends Exchange {
         if ($usedRaw !== null) {
             $used = ($decimals !== null) ? ($usedRaw / pow(10, $decimals)) : $usedRaw;
         }
+        // clamp to avoid negative $free due to inconsistent margin usage values
+        if ($total !== null) {
+            if ($used === null) {
+                $used = 0;
+            }
+            if ($used > $total) {
+                $used = $total;
+            }
+        }
         $free = ($total !== null && $used !== null) ? ($total - $used) : null;
+        if ($free !== null && $free < 0) {
+            $free = 0;
+        }
         $result = array( 'info' => $response );
         $result[$code] = array(
             'free' => $free,
             'used' => $used,
             'total' => $total,
         );
+        // For linear perps, allow shorting without base inventory by exposing a synthetic base capacity
+        // Compute per-market base capacity from quote $free and mark price with max leverage
+        try {
+            $this->load_markets();
+            $marketIds = is_array($this->markets_by_id || array()) ? array_keys($this->markets_by_id || array()) : array();
+            for ($i = 0; $i < count($marketIds); $i++) {
+                $m = $this->markets_by_id[$marketIds[$i]];
+                if (gettype($m) === 'array' && array_keys($m) === array_keys(array_keys($m)) && strlen($m) > 0) {
+                    $m = $m[0];
+                }
+                $info = $m ? ($m['info'] || array()) : array();
+                $baseCode = $this->safe_string($m, 'base');
+                $quoteDecimals2 = $this->safe_integer($info, 'quote_decimals');
+                $markInt2 = $this->safe_integer($info, 'mark_price');
+                $leverageMax = $this->safe_number($info, 'max_leverage', 1);
+                if ($baseCode && ($result[$baseCode] === null)) {
+                    $markPx = $this->from_decimals($markInt2, $quoteDecimals2);
+                    $markPx = $this->apply_price_multiplier($markPx);
+                    if (($free !== null) && ($free > 0) && ($markPx !== null) && ($markPx > 0)) {
+                        $baseCapacity = ($free * $leverageMax) / $markPx;
+                        $result[$baseCode] = array(
+                            'free' => $baseCapacity,
+                            'used' => 0,
+                            'total' => $baseCapacity,
+                        );
+                    } else {
+                        // if no mark price or no quote $free, still expose zero to avoid KeyError
+                        $result[$baseCode] = array( 'free' => 0, 'used' => 0, 'total' => 0 );
+                    }
+                }
+            }
+        } catch (Exception $e) {
+            // ignore synthetic capacity errors
+            // eslint-disable-next-line no-unused-vars
+            $_ = $e;
+        }
         return $this->safe_balance($result);
     }
 
@@ -666,42 +918,25 @@ class ekiden extends Exchange {
         $this->load_markets();
         $market = $this->market($this->normalize_symbol($symbol));
         $response = $this->v1PublicGetMarketCandlesStatsMarketAddr ($this->extend(array( 'market_addr' => $market['id'] ), $params));
-        // MarketStatsResponse => current_price, price_24h_ago, price_change_24h, high_24h, low_24h, volume_24h (quote volume), trades_24h
-        $last = $this->safe_number($response, 'current_price');
-        $high = $this->safe_number($response, 'high_24h');
-        $low = $this->safe_number($response, 'low_24h');
-        $percentage = $this->safe_number($response, 'price_change_24h');
-        $rawQuoteVolume = $this->safe_number($response, 'volume_24h');
-        $quoteVolume = 0;
-        if (($rawQuoteVolume !== null) && ($rawQuoteVolume > 0)) {
-            $quoteVolume = $rawQuoteVolume;
+        $ticker = $this->parse_ticker_stats($response, $market);
+        // Fallback => when 24h volumes are missing/zero from stats, compute from candles
+        $missingQuote = ($ticker['quoteVolume'] === null) || ($ticker['quoteVolume'] <= 0);
+        $missingBase = ($ticker['baseVolume'] === null) || ($ticker['baseVolume'] <= 0);
+        if ($missingQuote && $missingBase) {
+            $fromCandles = $this->compute2_4h_volumes_from_candles($market);
+            if (($fromCandles['baseVolume'] !== null) && ($fromCandles['baseVolume'] > 0)) {
+                $ticker['baseVolume'] = $fromCandles['baseVolume'];
+            }
+            if (($fromCandles['quoteVolume'] !== null) && ($fromCandles['quoteVolume'] > 0)) {
+                $ticker['quoteVolume'] = $fromCandles['quoteVolume'];
+            } elseif (($ticker['baseVolume'] !== null) && ($ticker['baseVolume'] > 0)) {
+                $last = $ticker['last'];
+                if (($last !== null) && ($last > 0)) {
+                    $ticker['quoteVolume'] = $ticker['baseVolume'] * $last;
+                }
+            }
         }
-        $baseVolume = 0;
-        if (($quoteVolume > 0) && ($last !== null) && ($last > 0)) {
-            $baseVolume = $quoteVolume / $last;
-        }
-        return $this->safe_ticker(array(
-            'symbol' => $market['symbol'],
-            'timestamp' => null,
-            'datetime' => null,
-            'high' => $high,
-            'low' => $low,
-            'bid' => null,
-            'bidVolume' => null,
-            'ask' => null,
-            'askVolume' => null,
-            'vwap' => null,
-            'open' => $this->safe_number($response, 'price_24h_ago'),
-            'close' => $last,
-            'last' => $last,
-            'previousClose' => null,
-            'change' => null,
-            'percentage' => $percentage,
-            'average' => null,
-            'baseVolume' => $baseVolume,
-            'quoteVolume' => $quoteVolume,
-            'info' => $response,
-        ), $market);
+        return $ticker;
     }
 
     public function fetch_tickers(?array $symbols = null, $params = array ()): array {
@@ -722,41 +957,23 @@ class ekiden extends Exchange {
             $symbol = $symbolsArray[$i];
             $market = $this->market($this->normalize_symbol($symbol));
             $response = $this->v1PublicGetMarketCandlesStatsMarketAddr ($this->extend(array( 'market_addr' => $market['id'] ), $params));
-            $last = $this->safe_number($response, 'current_price');
-            $high = $this->safe_number($response, 'high_24h');
-            $low = $this->safe_number($response, 'low_24h');
-            $percentage = $this->safe_number($response, 'price_change_24h');
-            $rawQuoteVolume = $this->safe_number($response, 'volume_24h');
-            $quoteVolume = 0;
-            if (($rawQuoteVolume !== null) && ($rawQuoteVolume > 0)) {
-                $quoteVolume = $rawQuoteVolume;
+            $ticker = $this->parse_ticker_stats($response, $market);
+            $missingQuote = ($ticker['quoteVolume'] === null) || ($ticker['quoteVolume'] <= 0);
+            $missingBase = ($ticker['baseVolume'] === null) || ($ticker['baseVolume'] <= 0);
+            if ($missingQuote && $missingBase) {
+                $fromCandles = $this->compute2_4h_volumes_from_candles($market);
+                if (($fromCandles['baseVolume'] !== null) && ($fromCandles['baseVolume'] > 0)) {
+                    $ticker['baseVolume'] = $fromCandles['baseVolume'];
+                }
+                if (($fromCandles['quoteVolume'] !== null) && ($fromCandles['quoteVolume'] > 0)) {
+                    $ticker['quoteVolume'] = $fromCandles['quoteVolume'];
+                } elseif (($ticker['baseVolume'] !== null) && ($ticker['baseVolume'] > 0)) {
+                    $last = $ticker['last'];
+                    if (($last !== null) && ($last > 0)) {
+                        $ticker['quoteVolume'] = $ticker['baseVolume'] * $last;
+                    }
+                }
             }
-            $baseVolume = 0;
-            if (($quoteVolume > 0) && ($last !== null) && ($last > 0)) {
-                $baseVolume = $quoteVolume / $last;
-            }
-            $ticker = $this->safe_ticker(array(
-                'symbol' => $market['symbol'],
-                'timestamp' => null,
-                'datetime' => null,
-                'high' => $high,
-                'low' => $low,
-                'bid' => null,
-                'bidVolume' => null,
-                'ask' => null,
-                'askVolume' => null,
-                'vwap' => null,
-                'open' => $this->safe_number($response, 'price_24h_ago'),
-                'close' => $last,
-                'last' => $last,
-                'previousClose' => null,
-                'change' => null,
-                'percentage' => $percentage,
-                'average' => null,
-                'baseVolume' => $baseVolume,
-                'quoteVolume' => $quoteVolume,
-                'info' => $response,
-            ), $market);
             $result[$market['symbol']] = $ticker;
         }
         return $result;
@@ -773,18 +990,12 @@ class ekiden extends Exchange {
         $market = $market || $this->safe_market($marketId);
         $baseDecimals = $this->safe_integer($market['info'] || array(), 'base_decimals');
         $quoteDecimals = $this->safe_integer($market['info'] || array(), 'quote_decimals');
-        $size = $this->safe_number($order, 'size');
+        $sizeInt = $this->safe_integer($order, 'size');
         $priceInt = $this->safe_integer($order, 'price');
-        $amount = $size;
-        $price = null;
-        if ($baseDecimals !== null && $size !== null) {
-            $amount = $size / pow(10, $baseDecimals);
-        }
+        $amount = $this->from_decimals($sizeInt, $baseDecimals);
+        $price = $this->from_decimals($priceInt, $quoteDecimals);
         if ($amount !== null) {
             $amount = abs($amount);
-        }
-        if ($quoteDecimals !== null && $priceInt !== null) {
-            $price = $priceInt / pow(10, $quoteDecimals);
         }
         $status = null;
         // map to ccxt statuses
@@ -859,7 +1070,7 @@ class ekiden extends Exchange {
             throw new ArgumentsRequired($this->id . ' fetchOrder() requires a $symbol to be specified');
         }
         $market = $this->market($this->normalize_symbol($symbol));
-        $request = array( 'market_addr' => $market['id'], 'per_page' => 50 );
+        $request = array( 'market_addr' => $market['id'], 'per_page' => 100 );
         $response = $this->v1PrivateGetUserOrders ($this->extend($request, $params));
         for ($i = 0; $i < count($response); $i++) {
             $item = $response[$i];
@@ -893,7 +1104,90 @@ class ekiden extends Exchange {
         }
         $leverage = $this->safe_integer($params, 'leverage', 1);
         $commitFlag = $this->safe_bool($params, 'commit', true);
-        $order = $this->scale_order_fields($market, $side, $amount, $price, $type, $leverage);
+        $postOnlyParam = $this->safe_bool($params, 'postOnly');
+        $reduceOnlyParam = $this->safe_bool($params, 'reduceOnly');
+        $params = $this->omit($params, array( 'postOnly', 'reduceOnly' ));
+        // Handle $market buy semantics => allow quote-$cost via $params->cost, enforce $price presence
+        $adjustedAmount = $amount;
+        $adjustedPrice = $price;
+        if (($type === 'market') && ($side === 'buy')) {
+            $cost = $this->safe_number($params, 'cost');
+            if ($cost !== null) {
+                if ($adjustedPrice === null) {
+                    throw new InvalidOrder($this->id . ' createOrder() requires $price when $cost is provided for $market buy orders');
+                }
+                $adjustedAmount = $cost / $adjustedPrice;
+                $params = $this->omit($params, 'cost');
+            } else {
+                $requiresPrice = $this->safe_bool($this->options, 'createMarketBuyOrderRequiresPrice', true);
+                if ($requiresPrice && ($adjustedPrice === null)) {
+                    throw new InvalidOrder($this->id . ' createOrder() requires the $price argument for $market buy orders to calculate notional for validation');
+                }
+            }
+        }
+        // Honor reduceOnly => ensure $order reduces existing position and does not exceed position size
+        if ($reduceOnlyParam) {
+            try {
+                $allPositions = $this->fetch_positions(null, array());
+                // find position for this $market
+                $posForMarket => Position = null;
+                for ($i = 0; $i < count($allPositions); $i++) {
+                    $p = $allPositions[$i];
+                    if ($p['symbol'] === $market['symbol']) {
+                        $posForMarket = $p;
+                        break;
+                    }
+                }
+                $posContracts = $posForMarket ? $this->safe_number($posForMarket, 'contracts') : 0;
+                $posSide = $posForMarket ? $this->safe_string($posForMarket, 'side') : null;
+                $absContracts = ($posContracts !== null) ? abs($posContracts) : 0;
+                if (!$posForMarket || !$posSide || ($absContracts === 0)) {
+                    throw new InvalidOrder($this->id . ' createOrder() reduceOnly is set but no position to reduce for ' . $market['symbol']);
+                }
+                if (($posSide === 'long' && $side !== 'sell') || ($posSide === 'short' && $side !== 'buy')) {
+                    throw new InvalidOrder($this->id . ' createOrder() reduceOnly $order $side must reduce the current position side');
+                }
+                // clamp $amount not to exceed current position size
+                if (($adjustedAmount !== null) && ($absContracts !== null)) {
+                    $adjustedAmount = min ($adjustedAmount, $absContracts);
+                    if ($adjustedAmount <= 0) {
+                        throw new InvalidOrder($this->id . ' createOrder() reduceOnly adjusted $amount is zero');
+                    }
+                }
+            } catch (Exception $e) {
+                if ($e instanceof InvalidOrder) {
+                    throw $e;
+                }
+                // if positions endpoint fails, fallback to proceed (cannot guarantee reduce-only without server support)
+            }
+        }
+        // Honor postOnly => ensure limit $order does not cross the spread
+        if ($postOnlyParam) {
+            $isLimit = ($type === 'limit');
+            if (!$isLimit) {
+                throw new InvalidOrder($this->id . ' createOrder() postOnly is only supported for limit orders');
+            }
+            if ($adjustedPrice === null) {
+                throw new InvalidOrder($this->id . ' createOrder() postOnly requires a price');
+            }
+            try {
+                $ob = $this->fetch_order_book($market['symbol'], 1);
+                $bestAsk = ($ob['asks'] && strlen($ob['asks']) > 0) ? $ob['asks'][0][0] : null;
+                $bestBid = ($ob['bids'] && strlen($ob['bids']) > 0) ? $ob['bids'][0][0] : null;
+                if ($side === 'buy' && ($bestAsk !== null) && ($adjustedPrice >= $bestAsk)) {
+                    throw new InvalidOrder($this->id . ' createOrder() postOnly buy $price would cross the best ask');
+                }
+                if ($side === 'sell' && ($bestBid !== null) && ($adjustedPrice <= $bestBid)) {
+                    throw new InvalidOrder($this->id . ' createOrder() postOnly sell $price would cross the best bid');
+                }
+            } catch (Exception $e) {
+                if ($e instanceof InvalidOrder) {
+                    throw $e;
+                }
+                // if orderbook fetch fails, proceed (cannot guarantee post-only)
+            }
+        }
+        $order = $this->scale_order_fields($market, $side, $adjustedAmount, $adjustedPrice, $type, $leverage);
         $payload = array( 'type' => 'order_create', 'orders' => array( $order ) );
         $nonce = (is_array($params) && array_key_exists('nonce', $params)) ? $this->safe_integer($params, 'nonce') : $this->milliseconds();
         $request = $this->build_signed_intent($payload, $nonce);
@@ -957,5 +1251,40 @@ class ekiden extends Exchange {
             $responseSigned2 = $this->v1PrivatePostUserIntent ($request);
         }
         return $this->parse_cancel_order_result($responseSigned2, $id, $market);
+    }
+
+    public function set_leverage(float $leverage, ?string $symbol = null, $params = array ()) {
+        $this->load_markets();
+        if ($symbol === null) {
+            throw new ArgumentsRequired($this->id . ' setLeverage() requires a $symbol argument');
+        }
+        $market = $this->market($this->normalize_symbol($symbol));
+        $hasPayload = $this->is_valid_signed_intent_params($params, 'leverage_assign');
+        $request = array();
+        if ($hasPayload) {
+            $commitProvided = $this->safe_bool($params, 'commit', false);
+            $request = $this->omit($params, array( 'commit' ));
+            $responseProvided = null;
+            if ($commitProvided) {
+                $responseProvided = $this->v1PrivatePostUserIntentCommit ($request);
+            } else {
+                $responseProvided = $this->v1PrivatePostUserIntent ($request);
+            }
+            return array( 'info' => $responseProvided, 'symbol' => $market['symbol'] );
+        }
+        if (!$this->secret) {
+            throw new NotSupported($this->id . ' setLeverage() requires either $params array( $payload, signature, $nonce ) or exchange.secret to sign the intent');
+        }
+        $commitFlag = $this->safe_bool($params, 'commit', true);
+        $payload = array( 'type' => 'leverage_assign', 'leverage' => $leverage, 'market_addr' => $market['id'] );
+        $nonce = (is_array($params) && array_key_exists('nonce', $params)) ? $this->safe_integer($params, 'nonce') : $this->milliseconds();
+        $request = $this->build_signed_intent($payload, $nonce);
+        $responseSigned = null;
+        if ($commitFlag) {
+            $responseSigned = $this->v1PrivatePostUserIntentCommit ($request);
+        } else {
+            $responseSigned = $this->v1PrivatePostUserIntent ($request);
+        }
+        return array( 'info' => $responseSigned, 'symbol' => $market['symbol'] );
     }
 }

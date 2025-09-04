@@ -7,6 +7,8 @@ interface Exchange {
     v1PublicGetMarketFills(params?: {}): Promise<implicitReturnType>;
     v1PublicGetMarketOrders(params?: {}): Promise<implicitReturnType>;
     v1PrivateGetUserOrders(params?: {}): Promise<implicitReturnType>;
+    v1PrivateGetUserPortfolio(params?: {}): Promise<implicitReturnType>;
+    v1PrivateGetUserPositions(params?: {}): Promise<implicitReturnType>;
     v1PrivatePostUserIntent(params?: {}): Promise<implicitReturnType>;
     v1PrivatePostUserIntentCommit(params?: {}): Promise<implicitReturnType>;
 }

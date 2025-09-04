@@ -8,5 +8,7 @@ class ImplicitAPI:
     v1_public_get_market_fills = v1PublicGetMarketFills = Entry('market/fills', ['v1', 'public'], 'GET', {'cost': 1})
     v1_public_get_market_orders = v1PublicGetMarketOrders = Entry('market/orders', ['v1', 'public'], 'GET', {'cost': 1})
     v1_private_get_user_orders = v1PrivateGetUserOrders = Entry('user/orders', ['v1', 'private'], 'GET', {'cost': 1})
+    v1_private_get_user_portfolio = v1PrivateGetUserPortfolio = Entry('user/portfolio', ['v1', 'private'], 'GET', {'cost': 1})
+    v1_private_get_user_positions = v1PrivateGetUserPositions = Entry('user/positions', ['v1', 'private'], 'GET', {'cost': 1})
     v1_private_post_user_intent = v1PrivatePostUserIntent = Entry('user/intent', ['v1', 'private'], 'POST', {'cost': 1})
     v1_private_post_user_intent_commit = v1PrivatePostUserIntentCommit = Entry('user/intent/commit', ['v1', 'private'], 'POST', {'cost': 1})

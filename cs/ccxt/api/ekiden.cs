@@ -41,6 +41,16 @@ public partial class ekiden : Exchange
         return await this.callAsync ("v1PrivateGetUserOrders",parameters);
     }
 
+    public async Task<object> v1PrivateGetUserPortfolio (object parameters = null)
+    {
+        return await this.callAsync ("v1PrivateGetUserPortfolio",parameters);
+    }
+
+    public async Task<object> v1PrivateGetUserPositions (object parameters = null)
+    {
+        return await this.callAsync ("v1PrivateGetUserPositions",parameters);
+    }
+
     public async Task<object> v1PrivatePostUserIntent (object parameters = null)
     {
         return await this.callAsync ("v1PrivatePostUserIntent",parameters);

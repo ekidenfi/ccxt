@@ -6,9 +6,10 @@
 from ccxt.async_support.base.exchange import Exchange
 from ccxt.abstract.ekiden import ImplicitAPI
 import math
-from ccxt.base.types import Any, Balances, Int, Market, Num, Order, OrderBook, OrderSide, OrderType, Str, Strings, Ticker, Tickers, Trade
+from ccxt.base.types import Any, Balances, Bool, Int, Market, Num, Order, OrderBook, OrderSide, OrderType, Position, Str, Strings, Ticker, Tickers, Trade
 from typing import List
 from ccxt.base.errors import ArgumentsRequired
+from ccxt.base.errors import InvalidOrder
 from ccxt.base.errors import OrderNotFound
 from ccxt.base.errors import NotSupported
 from ccxt.base.decimal_to_precision import DECIMAL_PLACES
@@ -36,6 +37,9 @@ class ekiden(Exchange, ImplicitAPI):
         return value
 
     def normalize_symbol(self, symbol: str) -> str:
+        # if symbol.includes(':'):
+        #     return symbol
+        # }
         s = symbol.upper()
         if s.find('/') >= 0:
             parts = s.split('/')
@@ -69,16 +73,8 @@ class ekiden(Exchange, ImplicitAPI):
 
     def serialize_string_hex(self, value: str) -> str:
         bin = self.encode(value)
-        # Build ULEB128 length manually using numberToLE for cross-language compatibility
         length = self.binary_length(bin)
-        v = length
-        ulebHex = ''
-        while(v >= 0x80):
-            low7 = v % 128
-            byteVal = low7 + 0x80
-            ulebHex += self.binary_to_base16(self.number_to_le(byteVal, 1))
-            v = int(math.floor(v / 0x80))
-        ulebHex += self.binary_to_base16(self.number_to_le(v, 1))
+        ulebHex = self.encode_uleb128_length(length)
         dataHex = self.binary_to_base16(bin)
         return ulebHex + dataHex
 
@@ -92,6 +88,101 @@ class ekiden(Exchange, ImplicitAPI):
             v = int(math.floor(v / 0x80))
         uleb += self.binary_to_base16(self.number_to_le(v, 1))
         return uleb
+
+    def from_decimals(self, valueInt: float, decimals: float) -> float:
+        if valueInt is None:
+            return None
+        if decimals is None:
+            return valueInt
+        return valueInt / math.pow(10, decimals)
+
+    def apply_price_multiplier(self, price: float) -> float:
+        multiplier = self.safe_number(self.options, 'priceMultiplier', 1)
+        if price is None:
+            return price
+        if (multiplier is not None) and (multiplier != 1):
+            return price * multiplier
+        return price
+
+    def parse_ticker_stats(self, response: dict, market: Market) -> Ticker:
+        last = self.safe_number(response, 'current_price')
+        high = self.safe_number(response, 'high_24h')
+        low = self.safe_number(response, 'low_24h')
+        percentage = self.safe_number(response, 'price_change_24h')
+        rawQuoteVolume = self.safe_number(response, 'volume_24h')
+        quoteVolume = 0
+        if (rawQuoteVolume is not None) and (rawQuoteVolume > 0):
+            quoteVolume = rawQuoteVolume
+        baseVolume = 0
+        if (quoteVolume > 0) and (last is not None) and (last > 0):
+            baseVolume = quoteVolume / last
+        infoMarket = market['info'] or {}
+        quoteDecimals = self.safe_integer(infoMarket, 'quote_decimals')
+        markInt = self.safe_integer(infoMarket, 'mark_price')
+        oracleInt = self.safe_integer(infoMarket, 'oracle_price')
+        markPrice = self.from_decimals(markInt, quoteDecimals)
+        indexPrice = self.from_decimals(oracleInt, quoteDecimals)
+        last = self.apply_price_multiplier(last)
+        high = self.apply_price_multiplier(high)
+        low = self.apply_price_multiplier(low)
+        markPrice = self.apply_price_multiplier(markPrice)
+        indexPrice = self.apply_price_multiplier(indexPrice)
+        now = self.milliseconds()
+        return self.safe_ticker({
+            'symbol': market['symbol'],
+            'timestamp': now,
+            'datetime': self.iso8601(now),
+            'high': high,
+            'low': low,
+            'bid': None,
+            'bidVolume': None,
+            'ask': None,
+            'askVolume': None,
+            'vwap': None,
+            'open': self.safe_number(response, 'price_24h_ago'),
+            'close': last,
+            'last': last,
+            'previousClose': None,
+            'change': None,
+            'percentage': percentage,
+            'average': None,
+            'baseVolume': baseVolume,
+            'quoteVolume': quoteVolume,
+            'markPrice': markPrice,
+            'indexPrice': indexPrice,
+            'info': response,
+        }, market)
+
+    async def compute2_4h_volumes_from_candles(self, market: Market) -> dict:
+        try:
+            since = self.milliseconds() - 24 * 60 * 60 * 1000
+            candles = await self.fetch_ohlcv(market['symbol'], '1m', since, 1440)
+            baseSum = 0
+            quoteSum = 0
+            infoMarket = market['info'] or {}
+            baseDecimals = self.safe_integer(infoMarket, 'base_decimals')
+            for i in range(0, len(candles)):
+                volRaw = candles[i][5]
+                close = candles[i][4]
+                if volRaw is not None:
+                    volBase: Any = volRaw
+                    if baseDecimals is not None:
+                        volBase = volRaw / math.pow(10, baseDecimals)
+                    if (volBase is not None) and (volBase > 0):
+                        baseSum += volBase
+                        if (close is not None) and (close > 0):
+                            quoteSum += volBase * close
+            result: dict = {}
+            if baseSum > 0:
+                result['baseVolume'] = baseSum
+            if quoteSum > 0:
+                result['quoteVolume'] = quoteSum
+            return result
+        except Exception as e:
+            # ignore fallback errors
+            # eslint-disable-next-line no-unused-vars
+            _ = e
+            return {}
 
     def serialize_action_payload_hex(self, payload: dict) -> str:
         # Mirrors ts-sdk/src/utils/buildOrderPayload.ts
@@ -177,7 +268,7 @@ class ekiden(Exchange, ImplicitAPI):
                 if sid is not None:
                     id = sid
         ts = self.safe_integer(response, 'timestamp')
-        timestamp = self.parse_to_int(ts) if (ts is not None) else None
+        timestamp = self.parse_to_int(ts * 1000) if (ts is not None) else None
         datetime = self.iso8601(timestamp)
         symbolOut = market['symbol'] if market else None
         return self.safe_order({
@@ -220,7 +311,7 @@ class ekiden(Exchange, ImplicitAPI):
         if id is None:
             id = self.safe_string(response, 'sid')
         ts = self.safe_integer(response, 'timestamp')
-        timestamp = self.parse_to_int(ts) if (ts is not None) else None
+        timestamp = self.parse_to_int(ts * 1000) if (ts is not None) else None
         datetime = self.iso8601(timestamp)
         symbolOut = market['symbol'] if market else None
         return self.safe_order({
@@ -263,10 +354,10 @@ class ekiden(Exchange, ImplicitAPI):
             'dex': True,
             'has': {
                 'CORS': None,
-                'spot': True,
+                'spot': False,
                 'margin': False,
                 'swap': True,
-                'future': True,
+                'future': False,
                 'option': False,
                 'cancelAllOrders': False,
                 'cancelOrder': True,
@@ -279,11 +370,12 @@ class ekiden(Exchange, ImplicitAPI):
                 'fetchOpenOrders': True,
                 'fetchOrder': True,
                 'fetchOrderBook': True,
-                'fetchPositions': False,
+                'fetchPositions': True,
                 'fetchTicker': True,
                 'fetchTickers': True,
                 'fetchTrades': True,
                 'sandbox': True,
+                'setLeverage': True,
             },
             'timeframes': {
                 '1m': '1m',
@@ -328,6 +420,8 @@ class ekiden(Exchange, ImplicitAPI):
                     'private': {
                         'get': {
                             'user/orders': 1,
+                            'user/portfolio': 1,
+                            'user/positions': 1,
                         },
                         'post': {
                             'user/intent': 1,
@@ -345,20 +439,12 @@ class ekiden(Exchange, ImplicitAPI):
                 },
             },
             'options': {
+                'defaultType': 'swap',
                 'sandboxMode': True,
+                'priceMultiplier': 1,
+                'createMarketBuyOrderRequiresPrice': True,
             },
             'commonCurrencies': {
-            },
-            'spot': {
-                'extends': 'default',
-            },
-            'future': {
-                'linear': {
-                    'extends': 'forPerps',
-                },
-                'inverse': {
-                    'extends': 'forPerps',
-                },
             },
         })
 
@@ -388,35 +474,48 @@ class ekiden(Exchange, ImplicitAPI):
             market = response[i]
             id = self.safe_string(market, 'addr')
             rawSymbol = self.safe_string(market, 'symbol')
-            symbol = self.normalize_symbol(rawSymbol) if (rawSymbol is not None) else None
+            normalized = self.normalize_symbol(rawSymbol) if (rawSymbol is not None) else None
             baseId = self.safe_string(market, 'base_addr')
             quoteId = self.safe_string(market, 'quote_addr')
+            # derive human-readable currency codes from normalized symbol
+            baseCode = None
+            quoteCode = None
+            if normalized:
+                parts = normalized.split('/')
+                if len(parts) > 1:
+                    baseCode = parts[0]
+                    quoteCode = parts[1].split(':')[0]
             baseDecimals = self.safe_integer(market, 'base_decimals')
             quoteDecimals = self.safe_integer(market, 'quote_decimals')
             linear = True
-            type = 'swap'
-            settle = None
-            settleId = None
+            type = 'future'
+            settle = quoteCode
+            settleId = quoteId
             active = True
             precision = {'amount': baseDecimals, 'price': quoteDecimals}
+            symbol = normalized
+            # if baseCode and quoteCode and settle:
+            #     symbol = baseCode + '/' + quoteCode + ':' + settle
+            # }
             result.append({
                 'id': id,
                 'symbol': symbol,
-                'base': baseId,
-                'quote': quoteId,
+                'base': baseCode,
+                'quote': quoteCode,
                 'baseId': baseId,
                 'quoteId': quoteId,
                 'type': type,
                 'spot': False,
                 'margin': False,
                 'swap': True,
-                'future': False,
+                'future': True,
                 'option': False,
                 'contract': True,
                 'linear': linear,
                 'inverse': not linear,
                 'settle': settle,
                 'settleId': settleId,
+                'contractSize': 1,
                 'active': active,
                 'precision': precision,
                 'limits': {},
@@ -435,15 +534,11 @@ class ekiden(Exchange, ImplicitAPI):
         quoteDecimals = self.safe_integer(market['info'] or {}, 'quote_decimals')
         sizeInt = self.safe_integer(trade, 'size')
         priceInt = self.safe_integer(trade, 'price')
-        amount = None
-        price = None
+        amount = self.from_decimals(sizeInt, baseDecimals)
+        price = self.from_decimals(priceInt, quoteDecimals)
         datetime = self.iso8601(timestamp) if (timestamp is not None) else None
-        if baseDecimals is not None and sizeInt is not None:
-            amount = sizeInt / math.pow(10, baseDecimals)
         if amount is not None:
             amount = abs(amount)
-        if quoteDecimals is not None and priceInt is not None:
-            price = priceInt / math.pow(10, quoteDecimals)
         cost = (amount * price) if (amount is not None and price is not None) else None
         return self.safe_trade({
             'id': id,
@@ -494,7 +589,7 @@ class ekiden(Exchange, ImplicitAPI):
             if priceInt is None or sizeInt is None:
                 continue
             key = str(priceInt)
-            sizeFloat = (abs(sizeInt) / math.pow(10, baseDecimals)) if (baseDecimals is not None) else None
+            sizeFloat = self.from_decimals(abs(sizeInt), baseDecimals)
             if sizeFloat is None:
                 continue
             if side == 'buy':
@@ -509,13 +604,15 @@ class ekiden(Exchange, ImplicitAPI):
         for i in range(0, len(bidKeys)):
             k = bidKeys[i]
             pInt = self.parse_to_numeric(k)
-            pFloat = (pInt / math.pow(10, quoteDecimals)) if (quoteDecimals is not None) else pInt
+            pFloat = self.from_decimals(pInt, quoteDecimals)
+            pFloat = self.apply_price_multiplier(pFloat)
             bids.append([pFloat, bidsMap[k]])
         askKeys = list(asksMap.keys())
         for i in range(0, len(askKeys)):
             k = askKeys[i]
             pInt = self.parse_to_numeric(k)
-            pFloat = (pInt / math.pow(10, quoteDecimals)) if (quoteDecimals is not None) else pInt
+            pFloat = self.from_decimals(pInt, quoteDecimals)
+            pFloat = self.apply_price_multiplier(pFloat)
             asks.append([pFloat, asksMap[k]])
         orderbook = {'bids': bids, 'asks': asks}
         result = self.parse_order_book(orderbook, symbol)
@@ -524,10 +621,92 @@ class ekiden(Exchange, ImplicitAPI):
             result['asks'] = result['asks'][0:limit]
         return result
 
+    async def fetch_positions(self, symbols: Strings = None, params={}) -> List[Position]:
+        await self.load_markets()
+        self.check_required_credentials(False)
+        symbols = self.market_symbols(symbols)
+        response = await self.v1PrivateGetUserPortfolio(params)
+        positions = self.safe_list(response, 'positions', [])
+        result: List[Position] = []
+        for i in range(0, len(positions)):
+            pos = positions[i]
+            marketId = self.safe_string(pos, 'market_addr')
+            if marketId is None:
+                continue  # cannot map to symbol
+            market = self.safe_market(marketId)
+            unified = self.parse_position(pos, market)
+            if symbols is None or (symbols.find(unified['symbol']) >= 0):
+                result.append(unified)
+        return result
+
+    def parse_position(self, position: dict, market: Market = None) -> Position:
+        marketId = self.safe_string(position, 'market_addr')
+        market = self.safe_market(marketId, market)
+        infoMarket = (market['info'] or {}) if market else {}
+        baseDecimals = self.safe_integer(infoMarket, 'base_decimals')
+        quoteDecimals = self.safe_integer(infoMarket, 'quote_decimals')
+        sizeInt = self.safe_integer(position, 'size')
+        priceInt = self.safe_integer(position, 'price')
+        marginInt = self.safe_integer(position, 'margin')
+        tsSec = self.safe_integer(position, 'timestamp')
+        timestamp = (tsSec * 1000) if (tsSec is not None) else None
+        contracts = self.from_decimals(abs(sizeInt), baseDecimals)
+        entryPrice = self.from_decimals(priceInt, quoteDecimals)
+        entryPrice = self.apply_price_multiplier(entryPrice)
+        markPx = None
+        markInt = self.safe_integer(infoMarket, 'mark_price')
+        if markInt is not None:
+            markPx = self.from_decimals(markInt, quoteDecimals)
+            markPx = self.apply_price_multiplier(markPx)
+        side = None
+        if sizeInt is not None:
+            if sizeInt > 0:
+                side = 'long'
+            elif sizeInt < 0:
+                side = 'short'
+        notional = (contracts * markPx) if (contracts is not None and markPx is not None) else None
+        collateral = self.from_decimals(marginInt, quoteDecimals) if (marginInt is not None) else None
+        unrealizedPnl = None
+        if markPx is not None and entryPrice is not None and sizeInt is not None:
+            unrealizedPnl = (markPx - entryPrice) * (sizeInt >= 1 if 0 else -1) * abs(contracts)
+        leverage = None
+        if (notional is not None) and (collateral is not None) and (collateral > 0):
+            leverage = notional / collateral
+        return self.safe_position({
+            'info': position,
+            'id': self.safe_string(position, 'sid'),
+            'symbol': market['symbol'] if market else None,
+            'notional': notional,
+            'marginMode': 'cross',
+            'liquidationPrice': None,
+            'entryPrice': entryPrice,
+            'unrealizedPnl': unrealizedPnl,
+            'realizedPnl': None,
+            'percentage': None,
+            'contracts': contracts,
+            'contractSize': None,
+            'markPrice': markPx,
+            'lastPrice': None,
+            'side': side,
+            'hedged': None,
+            'timestamp': timestamp,
+            'datetime': self.iso8601(timestamp) if (timestamp is not None) else None,
+            'lastUpdateTimestamp': timestamp,
+            'maintenanceMargin': None,
+            'maintenanceMarginPercentage': None,
+            'collateral': collateral,
+            'initialMargin': collateral,
+            'initialMarginPercentage': None,
+            'leverage': leverage,
+            'marginRatio': None,
+            'stopLossPrice': None,
+            'takeProfitPrice': None,
+        })
+
     async def fetch_balance(self, params={}) -> Balances:
         # Derive balances from user portfolio endpoint; assumes a single quote asset vault(e.g., USDC)
         self.check_required_credentials()
-        response = await self.request('user/portfolio', ['v1', 'private'], 'GET', params)
+        response = await self.v1PrivateGetUserPortfolio(params)
         # response: PortfolioResponse {vault_balances: [{asset_addr, balance}], summary: {total_margin_used}}
         vaults = self.safe_value(response, 'vault_balances', [])
         summary = self.safe_value(response, 'summary', {})
@@ -563,13 +742,52 @@ class ekiden(Exchange, ImplicitAPI):
         used = 0
         if usedRaw is not None:
             used = (usedRaw / math.pow(10, decimals)) if (decimals is not None) else usedRaw
+        # clamp to avoid negative free due to inconsistent margin usage values
+        if total is not None:
+            if used is None:
+                used = 0
+            if used > total:
+                used = total
         free = (total - used) if (total is not None and used is not None) else None
+        if free is not None and free < 0:
+            free = 0
         result: dict = {'info': response}
         result[code] = {
             'free': free,
             'used': used,
             'total': total,
         }
+        # For linear perps, allow shorting without base inventory by exposing a synthetic base capacity
+        # Compute per-market base capacity from quote free and mark price with max leverage
+        try:
+            await self.load_markets()
+            marketIds = list(self.markets_by_id or {}.keys())
+            for i in range(0, len(marketIds)):
+                m: Any = self.markets_by_id[marketIds[i]]
+                if isinstance(m, list) and len(m) > 0:
+                    m = m[0]
+                info = (m['info'] or {}) if m else {}
+                baseCode = self.safe_string(m, 'base')
+                quoteDecimals2 = self.safe_integer(info, 'quote_decimals')
+                markInt2 = self.safe_integer(info, 'mark_price')
+                leverageMax = self.safe_number(info, 'max_leverage', 1)
+                if baseCode and (result[baseCode] is None):
+                    markPx = self.from_decimals(markInt2, quoteDecimals2)
+                    markPx = self.apply_price_multiplier(markPx)
+                    if (free is not None) and (free > 0) and (markPx is not None) and (markPx > 0):
+                        baseCapacity = (free * leverageMax) / markPx
+                        result[baseCode] = {
+                            'free': baseCapacity,
+                            'used': 0,
+                            'total': baseCapacity,
+                        }
+                    else:
+                        # if no mark price or no quote free, still expose zero to avoid KeyError
+                        result[baseCode] = {'free': 0, 'used': 0, 'total': 0}
+        except Exception as e:
+            # ignore synthetic capacity errors
+            # eslint-disable-next-line no-unused-vars
+            _ = e
         return self.safe_balance(result)
 
     def parse_ohlcv(self, ohlcv, market: Market = None) -> list:
@@ -601,40 +819,21 @@ class ekiden(Exchange, ImplicitAPI):
         await self.load_markets()
         market = self.market(self.normalize_symbol(symbol))
         response = await self.v1PublicGetMarketCandlesStatsMarketAddr(self.extend({'market_addr': market['id']}, params))
-        # MarketStatsResponse: current_price, price_24h_ago, price_change_24h, high_24h, low_24h, volume_24h(quote volume), trades_24h
-        last = self.safe_number(response, 'current_price')
-        high = self.safe_number(response, 'high_24h')
-        low = self.safe_number(response, 'low_24h')
-        percentage = self.safe_number(response, 'price_change_24h')
-        rawQuoteVolume = self.safe_number(response, 'volume_24h')
-        quoteVolume = 0
-        if (rawQuoteVolume is not None) and (rawQuoteVolume > 0):
-            quoteVolume = rawQuoteVolume
-        baseVolume = 0
-        if (quoteVolume > 0) and (last is not None) and (last > 0):
-            baseVolume = quoteVolume / last
-        return self.safe_ticker({
-            'symbol': market['symbol'],
-            'timestamp': None,
-            'datetime': None,
-            'high': high,
-            'low': low,
-            'bid': None,
-            'bidVolume': None,
-            'ask': None,
-            'askVolume': None,
-            'vwap': None,
-            'open': self.safe_number(response, 'price_24h_ago'),
-            'close': last,
-            'last': last,
-            'previousClose': None,
-            'change': None,
-            'percentage': percentage,
-            'average': None,
-            'baseVolume': baseVolume,
-            'quoteVolume': quoteVolume,
-            'info': response,
-        }, market)
+        ticker = self.parse_ticker_stats(response, market)
+        # Fallback: when 24h volumes are missing/zero from stats, compute from candles
+        missingQuote = (ticker['quoteVolume'] is None) or (ticker['quoteVolume'] <= 0)
+        missingBase = (ticker['baseVolume'] is None) or (ticker['baseVolume'] <= 0)
+        if missingQuote and missingBase:
+            fromCandles = await self.compute2_4h_volumes_from_candles(market)
+            if (fromCandles['baseVolume'] is not None) and (fromCandles['baseVolume'] > 0):
+                ticker['baseVolume'] = fromCandles['baseVolume']
+            if (fromCandles['quoteVolume'] is not None) and (fromCandles['quoteVolume'] > 0):
+                ticker['quoteVolume'] = fromCandles['quoteVolume']
+            elif (ticker['baseVolume'] is not None) and (ticker['baseVolume'] > 0):
+                last = ticker['last']
+                if (last is not None) and (last > 0):
+                    ticker['quoteVolume'] = ticker['baseVolume'] * last
+        return ticker
 
     async def fetch_tickers(self, symbols: Strings = None, params={}) -> Tickers:
         """
@@ -653,39 +852,19 @@ class ekiden(Exchange, ImplicitAPI):
             symbol = symbolsArray[i]
             market = self.market(self.normalize_symbol(symbol))
             response = await self.v1PublicGetMarketCandlesStatsMarketAddr(self.extend({'market_addr': market['id']}, params))
-            last = self.safe_number(response, 'current_price')
-            high = self.safe_number(response, 'high_24h')
-            low = self.safe_number(response, 'low_24h')
-            percentage = self.safe_number(response, 'price_change_24h')
-            rawQuoteVolume = self.safe_number(response, 'volume_24h')
-            quoteVolume = 0
-            if (rawQuoteVolume is not None) and (rawQuoteVolume > 0):
-                quoteVolume = rawQuoteVolume
-            baseVolume = 0
-            if (quoteVolume > 0) and (last is not None) and (last > 0):
-                baseVolume = quoteVolume / last
-            ticker = self.safe_ticker({
-                'symbol': market['symbol'],
-                'timestamp': None,
-                'datetime': None,
-                'high': high,
-                'low': low,
-                'bid': None,
-                'bidVolume': None,
-                'ask': None,
-                'askVolume': None,
-                'vwap': None,
-                'open': self.safe_number(response, 'price_24h_ago'),
-                'close': last,
-                'last': last,
-                'previousClose': None,
-                'change': None,
-                'percentage': percentage,
-                'average': None,
-                'baseVolume': baseVolume,
-                'quoteVolume': quoteVolume,
-                'info': response,
-            }, market)
+            ticker = self.parse_ticker_stats(response, market)
+            missingQuote = (ticker['quoteVolume'] is None) or (ticker['quoteVolume'] <= 0)
+            missingBase = (ticker['baseVolume'] is None) or (ticker['baseVolume'] <= 0)
+            if missingQuote and missingBase:
+                fromCandles = await self.compute2_4h_volumes_from_candles(market)
+                if (fromCandles['baseVolume'] is not None) and (fromCandles['baseVolume'] > 0):
+                    ticker['baseVolume'] = fromCandles['baseVolume']
+                if (fromCandles['quoteVolume'] is not None) and (fromCandles['quoteVolume'] > 0):
+                    ticker['quoteVolume'] = fromCandles['quoteVolume']
+                elif (ticker['baseVolume'] is not None) and (ticker['baseVolume'] > 0):
+                    last = ticker['last']
+                    if (last is not None) and (last > 0):
+                        ticker['quoteVolume'] = ticker['baseVolume'] * last
             result[market['symbol']] = ticker
         return result
 
@@ -700,16 +879,12 @@ class ekiden(Exchange, ImplicitAPI):
         market = market or self.safe_market(marketId)
         baseDecimals = self.safe_integer(market['info'] or {}, 'base_decimals')
         quoteDecimals = self.safe_integer(market['info'] or {}, 'quote_decimals')
-        size = self.safe_number(order, 'size')
+        sizeInt = self.safe_integer(order, 'size')
         priceInt = self.safe_integer(order, 'price')
-        amount = size
-        price = None
-        if baseDecimals is not None and size is not None:
-            amount = size / math.pow(10, baseDecimals)
+        amount = self.from_decimals(sizeInt, baseDecimals)
+        price = self.from_decimals(priceInt, quoteDecimals)
         if amount is not None:
             amount = abs(amount)
-        if quoteDecimals is not None and priceInt is not None:
-            price = priceInt / math.pow(10, quoteDecimals)
         status = None
         # map to ccxt statuses
         if statusRaw == 'placed' or statusRaw == 'created' or statusRaw == 'partial_filled':
@@ -774,7 +949,7 @@ class ekiden(Exchange, ImplicitAPI):
         if symbol is None:
             raise ArgumentsRequired(self.id + ' fetchOrder() requires a symbol to be specified')
         market = self.market(self.normalize_symbol(symbol))
-        request: dict = {'market_addr': market['id'], 'per_page': 50}
+        request: dict = {'market_addr': market['id'], 'per_page': 100}
         response = await self.v1PrivateGetUserOrders(self.extend(request, params))
         for i in range(0, len(response)):
             item = response[i]
@@ -802,7 +977,70 @@ class ekiden(Exchange, ImplicitAPI):
             raise NotSupported(self.id + ' createOrder() requires either params {payload, signature, nonce} or exchange.secret to sign the intent')
         leverage = self.safe_integer(params, 'leverage', 1)
         commitFlag = self.safe_bool(params, 'commit', True)
-        order = self.scale_order_fields(market, side, amount, price, type, leverage)
+        postOnlyParam: Bool = self.safe_bool(params, 'postOnly')
+        reduceOnlyParam: Bool = self.safe_bool(params, 'reduceOnly')
+        params = self.omit(params, ['postOnly', 'reduceOnly'])
+        # Handle market buy semantics: allow quote-cost via params.cost, enforce price presence
+        adjustedAmount = amount
+        adjustedPrice: Any = price
+        if (type == 'market') and (side == 'buy'):
+            cost = self.safe_number(params, 'cost')
+            if cost is not None:
+                if adjustedPrice is None:
+                    raise InvalidOrder(self.id + ' createOrder() requires price when cost is provided for market buy orders')
+                adjustedAmount = cost / adjustedPrice
+                params = self.omit(params, 'cost')
+            else:
+                requiresPrice = self.safe_bool(self.options, 'createMarketBuyOrderRequiresPrice', True)
+                if requiresPrice and (adjustedPrice is None):
+                    raise InvalidOrder(self.id + ' createOrder() requires the price argument for market buy orders to calculate notional for validation')
+        # Honor reduceOnly: ensure order reduces existing position and does not exceed position size
+        if reduceOnlyParam:
+            try:
+                allPositions = await self.fetch_positions(None, {})
+                # find position for self market
+                posForMarket: Position = None
+                for i in range(0, len(allPositions)):
+                    p = allPositions[i]
+                    if p['symbol'] == market['symbol']:
+                        posForMarket = p
+                        break
+                posContracts = self.safe_number(posForMarket, 'contracts') if posForMarket else 0
+                posSide = self.safe_string(posForMarket, 'side') if posForMarket else None
+                absContracts = abs(posContracts) if (posContracts is not None) else 0
+                if not posForMarket or not posSide or (absContracts == 0):
+                    raise InvalidOrder(self.id + ' createOrder() reduceOnly is set but no position to reduce for ' + market['symbol'])
+                if (posSide == 'long' and side != 'sell') or (posSide == 'short' and side != 'buy'):
+                    raise InvalidOrder(self.id + ' createOrder() reduceOnly order side must reduce the current position side')
+                # clamp amount not to exceed current position size
+                if (adjustedAmount is not None) and (absContracts is not None):
+                    adjustedAmount = min(adjustedAmount, absContracts)
+                    if adjustedAmount <= 0:
+                        raise InvalidOrder(self.id + ' createOrder() reduceOnly adjusted amount is zero')
+            except Exception as e:
+                if isinstance(e, InvalidOrder):
+                    raise e
+                # if positions endpoint fails, fallback to proceed(cannot guarantee reduce-only without server support)
+        # Honor postOnly: ensure limit order does not cross the spread
+        if postOnlyParam:
+            isLimit = (type == 'limit')
+            if not isLimit:
+                raise InvalidOrder(self.id + ' createOrder() postOnly is only supported for limit orders')
+            if adjustedPrice is None:
+                raise InvalidOrder(self.id + ' createOrder() postOnly requires a price')
+            try:
+                ob = await self.fetch_order_book(market['symbol'], 1)
+                bestAsk = ob['asks'][0][0] if (ob['asks'] and len(ob['asks']) > 0) else None
+                bestBid = ob['bids'][0][0] if (ob['bids'] and len(ob['bids']) > 0) else None
+                if side == 'buy' and (bestAsk is not None) and (adjustedPrice >= bestAsk):
+                    raise InvalidOrder(self.id + ' createOrder() postOnly buy price would cross the best ask')
+                if side == 'sell' and (bestBid is not None) and (adjustedPrice <= bestBid):
+                    raise InvalidOrder(self.id + ' createOrder() postOnly sell price would cross the best bid')
+            except Exception as e:
+                if isinstance(e, InvalidOrder):
+                    raise e
+                # if orderbook fetch fails, proceed(cannot guarantee post-only)
+        order = self.scale_order_fields(market, side, adjustedAmount, adjustedPrice, type, leverage)
         payload: dict = {'type': 'order_create', 'orders': [order]}
         nonce = self.safe_integer(params, 'nonce') if ('nonce' in params) else self.milliseconds()
         request = self.build_signed_intent(payload, nonce)
@@ -855,3 +1093,32 @@ class ekiden(Exchange, ImplicitAPI):
         else:
             responseSigned2 = await self.v1PrivatePostUserIntent(request)
         return self.parse_cancel_order_result(responseSigned2, id, market)
+
+    async def set_leverage(self, leverage: float, symbol: Str = None, params={}):
+        await self.load_markets()
+        if symbol is None:
+            raise ArgumentsRequired(self.id + ' setLeverage() requires a symbol argument')
+        market = self.market(self.normalize_symbol(symbol))
+        hasPayload = self.is_valid_signed_intent_params(params, 'leverage_assign')
+        request: dict = {}
+        if hasPayload:
+            commitProvided = self.safe_bool(params, 'commit', False)
+            request = self.omit(params, ['commit'])
+            responseProvided = None
+            if commitProvided:
+                responseProvided = await self.v1PrivatePostUserIntentCommit(request)
+            else:
+                responseProvided = await self.v1PrivatePostUserIntent(request)
+            return {'info': responseProvided, 'symbol': market['symbol']}
+        if not self.secret:
+            raise NotSupported(self.id + ' setLeverage() requires either params {payload, signature, nonce} or exchange.secret to sign the intent')
+        commitFlag = self.safe_bool(params, 'commit', True)
+        payload: dict = {'type': 'leverage_assign', 'leverage': leverage, 'market_addr': market['id']}
+        nonce = self.safe_integer(params, 'nonce') if ('nonce' in params) else self.milliseconds()
+        request = self.build_signed_intent(payload, nonce)
+        responseSigned = None
+        if commitFlag:
+            responseSigned = await self.v1PrivatePostUserIntentCommit(request)
+        else:
+            responseSigned = await self.v1PrivatePostUserIntent(request)
+        return {'info': responseSigned, 'symbol': market['symbol']}

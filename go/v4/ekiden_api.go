@@ -31,6 +31,14 @@ func (this *ekiden) V1PrivateGetUserOrders (args ...interface{}) <-chan interfac
    return this.callEndpointAsync("v1PrivateGetUserOrders", args...)
 }
 
+func (this *ekiden) V1PrivateGetUserPortfolio (args ...interface{}) <-chan interface{} {
+   return this.callEndpointAsync("v1PrivateGetUserPortfolio", args...)
+}
+
+func (this *ekiden) V1PrivateGetUserPositions (args ...interface{}) <-chan interface{} {
+   return this.callEndpointAsync("v1PrivateGetUserPositions", args...)
+}
+
 func (this *ekiden) V1PrivatePostUserIntent (args ...interface{}) <-chan interface{} {
    return this.callEndpointAsync("v1PrivatePostUserIntent", args...)
 }
