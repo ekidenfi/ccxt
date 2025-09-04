@@ -6,7 +6,7 @@
 from ccxt.base.exchange import Exchange
 from ccxt.abstract.ekiden import ImplicitAPI
 import math
-from ccxt.base.types import Any, Balances, Int, Market, Num, Order, OrderBook, OrderSide, OrderType, Str, Ticker, Trade
+from ccxt.base.types import Any, Balances, Int, Market, Num, Order, OrderBook, OrderSide, OrderType, Str, Strings, Ticker, Tickers, Trade
 from typing import List
 from ccxt.base.errors import ArgumentsRequired
 from ccxt.base.errors import OrderNotFound
@@ -281,7 +281,7 @@ class ekiden(Exchange, ImplicitAPI):
                 'fetchOrderBook': True,
                 'fetchPositions': False,
                 'fetchTicker': True,
-                'fetchTickers': False,
+                'fetchTickers': True,
                 'fetchTrades': True,
                 'sandbox': True,
             },
@@ -440,6 +440,8 @@ class ekiden(Exchange, ImplicitAPI):
         datetime = self.iso8601(timestamp) if (timestamp is not None) else None
         if baseDecimals is not None and sizeInt is not None:
             amount = sizeInt / math.pow(10, baseDecimals)
+        if amount is not None:
+            amount = abs(amount)
         if quoteDecimals is not None and priceInt is not None:
             price = priceInt / math.pow(10, quoteDecimals)
         cost = (amount * price) if (amount is not None and price is not None) else None
@@ -492,7 +494,7 @@ class ekiden(Exchange, ImplicitAPI):
             if priceInt is None or sizeInt is None:
                 continue
             key = str(priceInt)
-            sizeFloat = (sizeInt / math.pow(10, baseDecimals)) if (baseDecimals is not None) else None
+            sizeFloat = (abs(sizeInt) / math.pow(10, baseDecimals)) if (baseDecimals is not None) else None
             if sizeFloat is None:
                 continue
             if side == 'buy':
@@ -605,7 +607,9 @@ class ekiden(Exchange, ImplicitAPI):
         low = self.safe_number(response, 'low_24h')
         percentage = self.safe_number(response, 'price_change_24h')
         rawQuoteVolume = self.safe_number(response, 'volume_24h')
-        quoteVolume = 0 if (not rawQuoteVolume) else rawQuoteVolume
+        quoteVolume = 0
+        if (rawQuoteVolume is not None) and (rawQuoteVolume > 0):
+            quoteVolume = rawQuoteVolume
         baseVolume = 0
         if (quoteVolume > 0) and (last is not None) and (last > 0):
             baseVolume = quoteVolume / last
@@ -632,6 +636,59 @@ class ekiden(Exchange, ImplicitAPI):
             'info': response,
         }, market)
 
+    def fetch_tickers(self, symbols: Strings = None, params={}) -> Tickers:
+        """
+        fetches price tickers for multiple markets, statistical information calculated over the past 24 hours for each market
+        :param str[]|None symbols: unified symbols of the markets to fetch the ticker for, all market tickers are returned if not assigned
+        :param dict [params]: extra parameters specific to the exchange API endpoint
+        :returns dict: a dictionary of tickers indexed by market symbol
+        """
+        self.load_markets()
+        symbols = self.market_symbols(symbols)
+        symbolsArray: Any = symbols
+        if symbolsArray is None:
+            symbolsArray = self.symbols
+        result: dict = {}
+        for i in range(0, len(symbolsArray)):
+            symbol = symbolsArray[i]
+            market = self.market(self.normalize_symbol(symbol))
+            response = self.v1PublicGetMarketCandlesStatsMarketAddr(self.extend({'market_addr': market['id']}, params))
+            last = self.safe_number(response, 'current_price')
+            high = self.safe_number(response, 'high_24h')
+            low = self.safe_number(response, 'low_24h')
+            percentage = self.safe_number(response, 'price_change_24h')
+            rawQuoteVolume = self.safe_number(response, 'volume_24h')
+            quoteVolume = 0
+            if (rawQuoteVolume is not None) and (rawQuoteVolume > 0):
+                quoteVolume = rawQuoteVolume
+            baseVolume = 0
+            if (quoteVolume > 0) and (last is not None) and (last > 0):
+                baseVolume = quoteVolume / last
+            ticker = self.safe_ticker({
+                'symbol': market['symbol'],
+                'timestamp': None,
+                'datetime': None,
+                'high': high,
+                'low': low,
+                'bid': None,
+                'bidVolume': None,
+                'ask': None,
+                'askVolume': None,
+                'vwap': None,
+                'open': self.safe_number(response, 'price_24h_ago'),
+                'close': last,
+                'last': last,
+                'previousClose': None,
+                'change': None,
+                'percentage': percentage,
+                'average': None,
+                'baseVolume': baseVolume,
+                'quoteVolume': quoteVolume,
+                'info': response,
+            }, market)
+            result[market['symbol']] = ticker
+        return result
+
     def parse_order(self, order: dict, market: Market = None) -> Order:
         id = self.safe_string(order, 'sid')
         statusRaw = self.safe_string(order, 'status')
@@ -649,6 +706,8 @@ class ekiden(Exchange, ImplicitAPI):
         price = None
         if baseDecimals is not None and size is not None:
             amount = size / math.pow(10, baseDecimals)
+        if amount is not None:
+            amount = abs(amount)
         if quoteDecimals is not None and priceInt is not None:
             price = priceInt / math.pow(10, quoteDecimals)
         status = None

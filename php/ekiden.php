@@ -310,7 +310,7 @@ class ekiden extends Exchange {
                 'fetchOrderBook' => true,
                 'fetchPositions' => false,
                 'fetchTicker' => true,
-                'fetchTickers' => false,
+                'fetchTickers' => true,
                 'fetchTrades' => true,
                 'sandbox' => true,
             ),
@@ -478,6 +478,9 @@ class ekiden extends Exchange {
         if ($baseDecimals !== null && $sizeInt !== null) {
             $amount = $sizeInt / pow(10, $baseDecimals);
         }
+        if ($amount !== null) {
+            $amount = abs($amount);
+        }
         if ($quoteDecimals !== null && $priceInt !== null) {
             $price = $priceInt / pow(10, $quoteDecimals);
         }
@@ -536,7 +539,7 @@ class ekiden extends Exchange {
                 continue;
             }
             $key = (string) $priceInt;
-            $sizeFloat = ($baseDecimals !== null) ? ($sizeInt / pow(10, $baseDecimals)) : null;
+            $sizeFloat = ($baseDecimals !== null) ? (abs($sizeInt) / pow(10, $baseDecimals)) : null;
             if ($sizeFloat === null) {
                 continue;
             }
@@ -669,7 +672,10 @@ class ekiden extends Exchange {
         $low = $this->safe_number($response, 'low_24h');
         $percentage = $this->safe_number($response, 'price_change_24h');
         $rawQuoteVolume = $this->safe_number($response, 'volume_24h');
-        $quoteVolume = (!$rawQuoteVolume) ? 0 : $rawQuoteVolume;
+        $quoteVolume = 0;
+        if (($rawQuoteVolume !== null) && ($rawQuoteVolume > 0)) {
+            $quoteVolume = $rawQuoteVolume;
+        }
         $baseVolume = 0;
         if (($quoteVolume > 0) && ($last !== null) && ($last > 0)) {
             $baseVolume = $quoteVolume / $last;
@@ -698,6 +704,64 @@ class ekiden extends Exchange {
         ), $market);
     }
 
+    public function fetch_tickers(?array $symbols = null, $params = array ()): array {
+        /**
+         * fetches price tickers for multiple markets, statistical information calculated over the past 24 hours for each $market
+         * @param {string[]|null} $symbols unified $symbols of the markets to fetch the $ticker for, all $market tickers are returned if not assigned
+         * @param {array} [$params] extra parameters specific to the exchange API endpoint
+         * @return {array} a dictionary of tickers indexed by $market $symbol
+         */
+        $this->load_markets();
+        $symbols = $this->market_symbols($symbols);
+        $symbolsArray = $symbols;
+        if ($symbolsArray === null) {
+            $symbolsArray = $this->symbols;
+        }
+        $result = array();
+        for ($i = 0; $i < count($symbolsArray); $i++) {
+            $symbol = $symbolsArray[$i];
+            $market = $this->market($this->normalize_symbol($symbol));
+            $response = $this->v1PublicGetMarketCandlesStatsMarketAddr ($this->extend(array( 'market_addr' => $market['id'] ), $params));
+            $last = $this->safe_number($response, 'current_price');
+            $high = $this->safe_number($response, 'high_24h');
+            $low = $this->safe_number($response, 'low_24h');
+            $percentage = $this->safe_number($response, 'price_change_24h');
+            $rawQuoteVolume = $this->safe_number($response, 'volume_24h');
+            $quoteVolume = 0;
+            if (($rawQuoteVolume !== null) && ($rawQuoteVolume > 0)) {
+                $quoteVolume = $rawQuoteVolume;
+            }
+            $baseVolume = 0;
+            if (($quoteVolume > 0) && ($last !== null) && ($last > 0)) {
+                $baseVolume = $quoteVolume / $last;
+            }
+            $ticker = $this->safe_ticker(array(
+                'symbol' => $market['symbol'],
+                'timestamp' => null,
+                'datetime' => null,
+                'high' => $high,
+                'low' => $low,
+                'bid' => null,
+                'bidVolume' => null,
+                'ask' => null,
+                'askVolume' => null,
+                'vwap' => null,
+                'open' => $this->safe_number($response, 'price_24h_ago'),
+                'close' => $last,
+                'last' => $last,
+                'previousClose' => null,
+                'change' => null,
+                'percentage' => $percentage,
+                'average' => null,
+                'baseVolume' => $baseVolume,
+                'quoteVolume' => $quoteVolume,
+                'info' => $response,
+            ), $market);
+            $result[$market['symbol']] = $ticker;
+        }
+        return $result;
+    }
+
     public function parse_order(array $order, ?array $market = null): array {
         $id = $this->safe_string($order, 'sid');
         $statusRaw = $this->safe_string($order, 'status');
@@ -715,6 +779,9 @@ class ekiden extends Exchange {
         $price = null;
         if ($baseDecimals !== null && $size !== null) {
             $amount = $size / pow(10, $baseDecimals);
+        }
+        if ($amount !== null) {
+            $amount = abs($amount);
         }
         if ($quoteDecimals !== null && $priceInt !== null) {
             $price = $priceInt / pow(10, $quoteDecimals);

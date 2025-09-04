@@ -3,7 +3,7 @@
 import Exchange from './abstract/ekiden.js';
 import { DECIMAL_PLACES } from './base/functions/number.js';
 import { ArgumentsRequired, OrderNotFound, NotSupported } from './base/errors.js';
-import type { Market, OHLCV, Order, Int, Ticker, Num, OrderSide, OrderType, Dict, Str, Trade, OrderBook, Balances } from './base/types.js';
+import type { Market, OHLCV, Order, Int, Ticker, Num, OrderSide, OrderType, Dict, Str, Trade, OrderBook, Balances, Tickers, Strings } from './base/types.js';
 import { ed25519 } from './static_dependencies/noble-curves/ed25519.js';
 import { eddsa } from './base/functions/crypto.js';
 //  ---------------------------------------------------------------------------
@@ -313,7 +313,7 @@ export default class ekiden extends Exchange {
                 'fetchOrderBook': true,
                 'fetchPositions': false,
                 'fetchTicker': true,
-                'fetchTickers': false,
+                'fetchTickers': true,
                 'fetchTrades': true,
                 'sandbox': true,
             },
@@ -481,6 +481,9 @@ export default class ekiden extends Exchange {
         if (baseDecimals !== undefined && sizeInt !== undefined) {
             amount = sizeInt / Math.pow (10, baseDecimals);
         }
+        if (amount !== undefined) {
+            amount = Math.abs (amount);
+        }
         if (quoteDecimals !== undefined && priceInt !== undefined) {
             price = priceInt / Math.pow (10, quoteDecimals);
         }
@@ -539,7 +542,7 @@ export default class ekiden extends Exchange {
                 continue;
             }
             const key = priceInt.toString ();
-            const sizeFloat = (baseDecimals !== undefined) ? (sizeInt / Math.pow (10, baseDecimals)) : undefined;
+            const sizeFloat = (baseDecimals !== undefined) ? (Math.abs (sizeInt) / Math.pow (10, baseDecimals)) : undefined;
             if (sizeFloat === undefined) {
                 continue;
             }
@@ -672,7 +675,10 @@ export default class ekiden extends Exchange {
         const low = this.safeNumber (response, 'low_24h');
         const percentage = this.safeNumber (response, 'price_change_24h');
         const rawQuoteVolume = this.safeNumber (response, 'volume_24h');
-        const quoteVolume = (!rawQuoteVolume) ? 0 : rawQuoteVolume;
+        let quoteVolume = 0;
+        if ((rawQuoteVolume !== undefined) && (rawQuoteVolume > 0)) {
+            quoteVolume = rawQuoteVolume;
+        }
         let baseVolume = 0;
         if ((quoteVolume > 0) && (last !== undefined) && (last > 0)) {
             baseVolume = quoteVolume / last;
@@ -701,6 +707,66 @@ export default class ekiden extends Exchange {
         }, market);
     }
 
+    /**
+     * @method
+     * @name ekiden#fetchTickers
+     * @description fetches price tickers for multiple markets, statistical information calculated over the past 24 hours for each market
+     * @param {string[]|undefined} symbols unified symbols of the markets to fetch the ticker for, all market tickers are returned if not assigned
+     * @param {object} [params] extra parameters specific to the exchange API endpoint
+     * @returns {object} a dictionary of tickers indexed by market symbol
+     */
+    async fetchTickers (symbols: Strings = undefined, params = {}): Promise<Tickers> {
+        await this.loadMarkets ();
+        symbols = this.marketSymbols (symbols);
+        let symbolsArray: any = symbols;
+        if (symbolsArray === undefined) {
+            symbolsArray = this.symbols;
+        }
+        const result: Dict = {};
+        for (let i = 0; i < symbolsArray.length; i++) {
+            const symbol = symbolsArray[i];
+            const market = this.market (this.normalizeSymbol (symbol));
+            const response = await this.v1PublicGetMarketCandlesStatsMarketAddr (this.extend ({ 'market_addr': market['id'] }, params));
+            const last = this.safeNumber (response, 'current_price');
+            const high = this.safeNumber (response, 'high_24h');
+            const low = this.safeNumber (response, 'low_24h');
+            const percentage = this.safeNumber (response, 'price_change_24h');
+            const rawQuoteVolume = this.safeNumber (response, 'volume_24h');
+            let quoteVolume = 0;
+            if ((rawQuoteVolume !== undefined) && (rawQuoteVolume > 0)) {
+                quoteVolume = rawQuoteVolume;
+            }
+            let baseVolume = 0;
+            if ((quoteVolume > 0) && (last !== undefined) && (last > 0)) {
+                baseVolume = quoteVolume / last;
+            }
+            const ticker = this.safeTicker ({
+                'symbol': market['symbol'],
+                'timestamp': undefined,
+                'datetime': undefined,
+                'high': high,
+                'low': low,
+                'bid': undefined,
+                'bidVolume': undefined,
+                'ask': undefined,
+                'askVolume': undefined,
+                'vwap': undefined,
+                'open': this.safeNumber (response, 'price_24h_ago'),
+                'close': last,
+                'last': last,
+                'previousClose': undefined,
+                'change': undefined,
+                'percentage': percentage,
+                'average': undefined,
+                'baseVolume': baseVolume,
+                'quoteVolume': quoteVolume,
+                'info': response,
+            }, market);
+            result[market['symbol']] = ticker;
+        }
+        return result;
+    }
+
     parseOrder (order: Dict, market: Market = undefined): Order {
         const id = this.safeString (order, 'sid');
         const statusRaw = this.safeString (order, 'status');
@@ -718,6 +784,9 @@ export default class ekiden extends Exchange {
         let price = undefined;
         if (baseDecimals !== undefined && size !== undefined) {
             amount = size / Math.pow (10, baseDecimals);
+        }
+        if (amount !== undefined) {
+            amount = Math.abs (amount);
         }
         if (quoteDecimals !== undefined && priceInt !== undefined) {
             price = priceInt / Math.pow (10, quoteDecimals);
